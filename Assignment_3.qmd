@@ -1,0 +1,1759 @@
+---
+title: "Real World Analysis of Weather & Happiness Data"
+author: "Dr U Bhalraam MBChB, BMSc(Hons.), MRCP(Edin.)"
+subtitle: "School of Informatics, University of Edinburgh"
+format:
+  html:
+    smooth-scroll: true
+    toc: true
+    toc_float: true
+editor: "visual"
+execute: 
+  cache: true
+---
+
+## Part 0 : Data Cleaning and Preparation
+
+### (i) Downloading the Data using the provided `stations.txt`
+
+The python chunk described here is used to download all the weather data required for this task. It imports the provided `stations.txt` file. It then iterates through all the lines to download all the files by inserting the station name into the URL.
+
+Each downloaded file is then stored in the path set in the variable `folder_name`.
+
+*Be sure to set the `folder_name` variable to a path accessible by your local machine.*
+
+```{python Downloader of MetOffice data from stations.txt}
+# Make sure your reticulate package has these libraries installed in the PYENV.
+# Set your conda environment in .Rprofile
+import os
+import requests
+
+# SPECIFY THE FOLDER YOU WANT YOUR WEATHER FILES TO BE SAVED!!
+folder_name = '/home/rstudio/Encrypted-Data/R/R Projects/DSTI_Assignment3/weather_data'
+os.makedirs(folder_name, exist_ok=True) #creates folder if not created yet.
+
+def download_file(station_name):
+    # Construct the URL
+    url = f'http://www.metoffice.gov.uk/pub/data/weather/uk/climate/stationdata/{station_name}data.txt'
+    
+    # Attempt to download the file
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  
+        # Raises an HTTPError if the response was an error
+        
+        # Define the path for saving the file
+        save_path = os.path.join(folder_name, f'{station_name}data.txt')
+        
+        # Save the content to a file
+        with open(save_path, 'wb') as file:
+            file.write(response.content)
+        print(f'Successfully downloaded: {station_name}')
+    # My error handling section as I needed to debug this code.
+    except requests.HTTPError as e:
+        print(f'Failed to download {url}. HTTPError: {e}')
+    except requests.RequestException as e:
+        print(f'Failed to download {url}. Error: {e}')
+
+# Open the text file and read lines
+# The file is split by lines, so that this can be fed into the function above.
+with open('stations.txt', 'r') as file:
+    station_names = file.read().splitlines()
+
+# Download files for each station
+for station_name in station_names:
+    download_file(station_name)
+```
+
+### (ii) Parsing all the Datafiles downloaded from the MetOffice
+
+The python script described here extracts and preserves most of the information presented in each data-file. For each datafile, these general information is extracted:
+
+1.  `name` = station name (line 1 of the file)
+
+2.  `irish_grid` is set to `TRUE` if the string "Irish Grid" is found anywhere in the file.\
+    (This is important for downstream longitude latitude calculations)
+
+3.  `location_info_1` = easting/northing/altitude/time-conditions for line 2
+
+4.  `location_info_2` = easting/northing/altitude/time-conditions for line 3
+
+The table is then extracted and processed line by line to create a `pandas` dataframe.
+
+The `.split()` method was used to seperate the table into its components.
+
+If the script finds fewer than seven parts, it adds `---` at the end of the line to keep things moving. This method isn't perfect since it only fixes missing info in the `sun` column, not in any other spots. But, after looking over the data, it seems this problem mostly pops up in the `sun` column anyway, so this fix does the job well enough for now.
+
+All denoted `*` for each of the columns are preserved and noted in a Boolean variable.\
+The `sun_sensor` used to log the sunshine data is also preserved as the script looks for `*` or `#` suffixes to `sun`.
+
+If a line has the word `Provisional` in it, another boolean is set for that line.
+
+When the station's dataframe is being concatenated, the appropriate `easting` and `northing` values are appended depending on the `year` and `month` of a particular location line.
+
+![Shows the data structure of a standard MetOffice weather data file, and where data is extracted from.](images/Picture1.png)
+
+```{python DataParser and Combiner}
+import pandas as pd
+import os
+import re
+import warnings
+
+# Filter out future warnings. This clutters the output section.
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+def read_and_process_file(file_path):
+    # Opens the datafiles and passes it to the process_weather_data function
+    with open(file_path, 'r', encoding='utf-8') as file:
+        data_str = file.read()
+    return process_weather_data(data_str)
+
+def replace_blanks_with_dashes(line):
+    # This function deals with datafiles that have "" instead of "---" as NaN in the sun column. I have attempted to code it such that it can replace blanks in any column, but I was unable to achieve this as I am approaching this problem in a line by line basis. If I had approached it differently, by removing the lines before the table and importing the table as a whole, I might have solved this appropriately.
+    parts = line.split()
+    if len(parts) < 7:
+        # Basically, If there are less than 7 parts, add '---' to the end.
+        # I have only observed this case when `sun` is blank.
+        # A crude fix, but it works for all the files.
+        line += '   ---'
+    return line
+  
+  
+# This function finds the altitude in meters in line 2 and extracts it.
+def parse_altitude(altitude_str):
+    match = re.search(r'(\d+)\s*(m|meter|metre)s?\b', altitude_str, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+  
+  
+  
+# This is a helper function which converts months to numbers if found.
+def month_to_number(month_str):
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    month_str = month_str[:3].capitalize() 
+    # There have been some instances where Sept is noted instead of Sep. This deals with that. It converts the string to uppercase and takes the first 3.
+    return months.index(month_str) + 1 if month_str in months else None
+  
+  
+# This is the most complicated function which looks for the following:
+# (MON)YYYY to (MON)YYYY
+# (MON)YYYY - (MON)YYYY
+# (MON)YYYY onwards
+# from (MON)YYYY
+# after (MON)YYYY
+# before (MON)YYYY
+# This function is necessary as some stations have changed location.
+
+def parse_location_info(line):
+    try:
+        easting, northing = re.findall(r'(\d+)E\s+(\d+)N', line)[0]
+        altitude = parse_altitude(line)
+        
+        # Handle 'onwards' with just a year
+        onwards_match = re.search(r'(\w+\s+)?(\d{4}) onwards', line)
+        if onwards_match:
+            start_month, start_year = onwards_match.groups()
+            start_month_num = month_to_number(start_month.strip()) if start_month else 1
+            start_year = int(start_year)
+            # No end year, indicating this setup continues indefinitely from the start point
+            return (easting, northing, altitude, start_year, start_month_num, None)
+        
+        # Handle period defined by specific start and end years
+        period_match = re.search(r'(?:\w+\s+)?(\d{4})\s*(?:to|\-)\s*(?:\w+\s+)?(\d{4})', line)
+        if period_match:
+            start_year, end_year = period_match.groups()
+            start_month_num = 1  # Default to January if month is not specified
+            end_month_num = 12  # Default to December if month is not specified
+            return (easting, northing, altitude, int(start_year), start_month_num, int(end_year))
+            
+        # Additional logic to handle the "to Apr 2005" format
+        # Extracting start and end months and years
+        start_month_match = re.search(r'to (\w+)\s+(\d{4})', line)
+        if start_month_match:
+            start_month, end_year = start_month_match.groups()
+            start_month_num = month_to_number(start_month)
+            end_year = int(end_year)
+            return (easting, northing, altitude, 0, start_month_num, end_year)
+
+        # Handle the "to 2005" and "to Apr 2005" format
+        to_match = re.search(r'to (\w+\s+\d{4})', line)
+        if to_match:
+            end_date = to_match.group(1)
+            # If the end date includes a month, extract it
+            end_month_match = re.search(r'(\w+) (\d{4})', end_date)
+            if end_month_match:
+                end_month, end_year = end_month_match.groups()
+                end_month_num = month_to_number(end_month)
+            else:
+                end_month_num = 12  # Assuming December if month not specified
+                end_year = int(end_date.split()[-1])
+            start_year = min(int(year.group()) for year in re.finditer(r'\b\d{4}\b', line))
+            return (easting, northing, altitude, start_year, 1, int(end_year), end_month_num)
+        
+        # Handle "from Sept 2007" or "from Jan 2007" format
+        from_match = re.search(r'from (\w+\s+)?(\d{4})', line)
+        if from_match:
+            start_month, start_year = from_match.groups()
+            start_month_num = month_to_number(start_month.strip()) if start_month else 1
+            start_year = int(start_year)
+            # No end year, indicating this setup continues indefinitely from the start point
+            return (easting, northing, altitude, start_year, start_month_num, None)
+            
+        # Handle "after 1998" or "after Jan 1998" format
+        after_match = re.search(r'after (\w+\s+)?(\d{4})', line)
+        if after_match:
+            start_month, after_year = after_match.groups()
+            start_month_num = month_to_number(start_month.strip()) if start_month else 1
+            after_year = int(after_year)
+            # Treat it as "1998 onwards" or "Jan 1998 onwards"
+            return (easting, northing, altitude, after_year, start_month_num, None)
+        
+        # Handle "before 1998" format
+        before_match = re.search(r'before (\w+)\s+(\d{4})', line)
+        if before_match:
+            before_month, before_year = before_match.groups()
+            before_month_num = month_to_number(before_month) if before_month else 1
+            before_year = int(before_year)
+            return (easting, northing, altitude, 1700, before_month_num, before_year)
+        
+        return (easting, northing, altitude, 1700, 1, 2029, 12)  
+    # Return None as a fallback if no recognized format is matched.
+    except:
+        return None
+
+# This function looks for * in values and sets the estimated variable to TRUE
+# It also removes it so that it can be parsed as a float.
+def extract_value_and_estimation(value_str):
+    # Check if the value is estimated
+    estimated = True if '*' in value_str else False
+    # Remove any "*" and "#" characters
+    value_str = value_str.replace('*', '')
+    # Convert the value to float
+    value = float(value_str) if value_str != '---' else None
+    
+    return value, estimated
+
+# This function is similar to the previous one, except that this sets the sun_sensor variable so we can ensure that this data is also extracted.
+# I have optimised this function to deal with 5*#, 5#*, 5# and 5*
+def extract_sun_value_and_estimation(value_str):
+    # First check if value_str is a placeholder for missing data
+    if value_str == '---':
+        return None, False, None  #Important line to preserve NA
+    # Check if "#" is present, indicating new sun sensor use
+    sun_sensor = '#' in value_str
+    # Check if the value is estimated (presence of "*")
+    estimated = '*' in value_str
+    # Remove any "*" and "#" characters to isolate the numeric value. 
+    # Whitby has $ appended for no reason, so this section deals with that.
+    clean_value_str = re.sub(r'[^\d.]+', '', value_str)
+    # Convert the value to float
+    value = float(clean_value_str)
+    
+    return value, estimated, sun_sensor
+
+
+#This function creates the dataframe for each station
+def process_weather_data(data_str):
+    lines = data_str.strip().split('\n')
+    name = lines[0]
+    
+    # Finds the "Irish Grid" in line 2 of the datafile.
+    is_irish = "Irish Grid" in lines[1]
+    # These are all the datapoints that will be extracted. + Provisional
+    # I have decided to extract easting/northing as line 3 usually omits longitiude and latitide data. These can be calculated from easting/northing with greater accuracy.
+    columns = ['name', 'year', 'month', 'easting', 'northing', 'altitude', 'tmax', 'tmin', 'af', 'rain', 'sun', 'sun_sensor']
+    data_table = pd.DataFrame(columns=columns)
+
+    # Lines 2 and 3 can contain location information, depending if it is a 'complex' case or not. A complex case is defined as a station that moved partways in the datastream.
+    location_info_1 = parse_location_info(lines[1]) #Line 2 analysis
+    location_info_2 = parse_location_info(lines[2]) #Line 3 analysis
+
+    # Dynamically find the line number where 'yyyy' is encountered
+    yyyy_line_number = None
+    for i, line in enumerate(lines):
+        if 'yyyy' in line:
+            yyyy_line_number = i
+            break
+
+    # Use the yyyy_line_number to adjust the starting index of the loop
+    for line in lines[yyyy_line_number+2:]: #data starts at yyyy line + 2
+        preprocessed_line = replace_blanks_with_dashes(line)
+        parts = preprocessed_line.split()
+        try:
+            year = int(parts[0])
+            month = int(parts[1])
+        except ValueError:
+            continue  # Skip header or malformed lines
+        
+        #Using parts, we can extract these values easily.
+        tmax, tmax_estimated = extract_value_and_estimation(parts[2])
+        tmin, tmin_estimated = extract_value_and_estimation(parts[3])
+        af, af_estimated = extract_value_and_estimation(parts[4])
+        rain, rain_estimated = extract_value_and_estimation(parts[5])
+        sun, sun_estimated, sun_sensor = extract_sun_value_and_estimation(parts[6])
+        sensor_used = 'Kipp & Zonen' if sun_sensor == True else ('Campbell Stokes' if sun_sensor == False else None)
+        provisional = 'provisional' in line.lower()
+
+        # This section deals with the logic,
+        # What to do if location_info_1 & location_info_2 are filled,
+        # What to do if only location_info_1 is filled,
+        # What to do if only location_info_2 is filled.
+        easting, northing, altitude = None, None, None #Initialise vars.
+        
+        if location_info_1 is not None:
+            easting, northing, altitude = location_info_1[:3]
+        # If location_info_2 is available, use it to override values
+        if location_info_2 is not None:
+            if year >= location_info_2[3] and (location_info_2[5] is None or year <= location_info_2[5]):
+                easting, northing, altitude = location_info_2[:3]
+
+        # Ensure that easting, northing, and altitude are defined before using them
+        if easting is not None and northing is not None and altitude is not None:
+            # Create a row DataFrame from the dictionary
+            row_df = pd.DataFrame([{
+                'name': name,
+                'year': year,
+                'month': month,
+                'tmax': tmax,
+                'tmin': tmin,
+                'af': af,
+                'rain': rain,
+                'sun': sun,
+                'tmax_est': tmax_estimated,
+                'tmin_est': tmin_estimated,
+                'af_est': af_estimated,
+                'rain_est': rain_estimated,
+                'sun_est': sun_estimated,
+                'sun_sensor': sensor_used,
+                'easting': easting,
+                'northing': northing,
+                'altitude': altitude,
+                'prov_est': provisional
+                }])
+            # Append the row to the data_table
+            data_table = pd.concat([data_table, row_df], ignore_index=True)
+
+    return data_table, is_irish, name
+  
+
+data_directory = '/home/rstudio/Encrypted-Data/R/R Projects/DSTI_Assignment3/weather_data'
+data_frames = []
+irish_files = [] # List to keep track of files based on the Irish Grid
+
+for file_name in os.listdir(data_directory):
+    file_path = os.path.join(data_directory, file_name)
+    if os.path.isfile(file_path) and file_name.endswith('.txt'):
+        try:
+            df, is_irish, name = read_and_process_file(file_path)
+            data_frames.append(df)
+            print(f"Parsed {file_name}.")
+            if is_irish: # If irish_grid, save the name of the station.
+              irish_files.append(name)
+        except Exception as e:
+            print(f"Error processing file {file_name}: {e}")
+
+# The combined dataframe is stored in combined_weather_data.csv in the current directory.
+if data_frames:
+    combined_data = pd.concat(data_frames, ignore_index=True)
+    combined_data.to_csv(os.path.join(data_directory, 'combined_weather_data.csv'), index=False)
+```
+
+### (iii) Calculating Longitude and Latitude in R
+
+The script now permanently moves to R as it is superior for data wrangling. The `pandas` dataframe captured in the previous chunk can be called directly into the R environment *via* the `reticulate` package with the `py$` suffix.
+
+If this fails, one can easily bring the saved combined station `combined_weather_data.csv` file into R with the `readxl` package.
+
+Here we use the `sp` and `sf` packages to convert the `easting` and `northing` values from the British National Grid and the Irish Grid into `latitudes` and `longitudes`.
+
+The final `weather` dataframe is created. An interactive `reactable` table is displayed after the code chunk for the user to be able to browse through the data of the 37 stations.
+
+I have implemented a quick filter function for the `station`, `year`, and `month` column using javascript so the user can quickly find the data required.
+
+```{r Import combined file into R and calculate co-ordinates}
+suppressPackageStartupMessages(library(tidyverse)) 
+# for the tidyverse
+suppressPackageStartupMessages(library(sp)) 
+#required for lon/lat calculations
+suppressPackageStartupMessages(library(sf)) 
+# required for lon/lat calculations
+suppressPackageStartupMessages(library(reactable))
+# To allow reactive Tables
+
+S_weather <- py$combined_data %>% tibble() # extract pandas df from pyenv
+S_weather[S_weather == 'NaN'] <- NA #pandas marks its NA as NaN
+S_weather[S_weather == 'NaN'] <- NA
+
+# If access to Python Environment from R fails, you can import from CSV.
+## ENABLE AND SET THIS LINE IF PYTHON IMPORT DOES NOT WORK ##
+# S_weather <- read_csv("data/combined_weather_data.csv")
+
+S_weather_irish <- S_weather %>% 
+  filter(name %in% py$irish_files) # Step 1/3 : df just the irish stations
+
+S_weather_rest <- S_weather %>% 
+  filter(!(name %in% py$irish_files)) # Step 2/3 : df without the irish stations
+
+# Step 3/3 : Reorder S_weather so rbind later works properly.
+S_weather_ordered <- rbind(S_weather_irish, S_weather_rest)
+
+# Convert Irish stations into a spatial dataframe with Irish Grid
+irish_stations_sf <- st_as_sf(S_weather_irish, coords = c("easting", "northing"), crs = 29902)
+
+# Convert the entire dataset into a spatial dataframe with British National Grid
+non_irish_stations_sf <- st_as_sf(S_weather_rest, coords = c("easting", "northing"), crs = 27700)
+
+# Transform Irish stations to WGS84
+irish_stations_wgs84 <- st_transform(irish_stations_sf, crs = 4326)
+
+# Transform the rest to WGS84
+non_irish_stations_wgs84 <- st_transform(non_irish_stations_sf, crs = 4326)
+
+# Combine the Irish and rest stations
+all_stations_wgs84 <- rbind(irish_stations_wgs84, non_irish_stations_wgs84)
+
+# Extract coordinates
+coords <- st_coordinates(all_stations_wgs84)
+
+# Add Longitude and Latitude back to S_weather
+S_weather_ordered$Longitude <- coords[, 'X']
+S_weather_ordered$Latitude <- coords[, 'Y']
+
+# This process extracts many more decimal points for longitude/latitude.
+S_weather <- S_weather_ordered
+
+# Create active working dataframe (with all columns handled)
+weather <- S_weather %>%
+  transmute(station = name,
+            year = as.integer(year),
+            month = as.integer(month),
+            latitude = as.numeric(Latitude),
+            longitude = as.numeric(Longitude),
+            altitude = as.integer(altitude),
+            t_min = as.numeric(tmin),
+            tmin_est = factor(tmin_est, levels = c("FALSE", "TRUE"), labels = c("No", "Yes")),
+            t_max = as.numeric(tmax),
+            tmax_est = factor(tmax_est, levels = c("FALSE", "TRUE"), labels = c("No", "Yes")),
+            af_inmth = as.numeric(af),
+            af_est = factor(af_est, levels = c("FALSE", "TRUE"), labels = c("No", "Yes")),
+            rain = as.numeric(rain),
+            rain_est = factor(rain_est, levels = c("FALSE", "TRUE"), labels = c("No", "Yes")),
+            sun = as.numeric(sun),
+            sun_est = factor(sun_est, levels = c("FALSE", "TRUE"), labels = c("No", "Yes")),
+            sun_sensor = factor(sun_sensor, 
+                                levels = c("Campbell Stokes", "Kipp & Zonen"),
+                                labels = c("Campbell Stokes", "Kipp & Zonen")),
+            provisional = factor(prov_est, levels = c("FALSE", "TRUE"), labels = c("No", "Yes")),
+  )
+
+set.seed(123)
+# Review a table that has 3 random weather lines per weather station. (37*3 = 111)
+# You can see that different lon/lat is attributed to Lowestoft depending on the year. (venue changed from 09/2007)
+
+# This is an interactive filterable table which you can use to find the station/year/month you desire.
+weather %>%
+  reactable(columns = list(
+    station = colDef(
+      filterable = TRUE,
+      # Using JavaScript to apply logic for filtering
+      filterMethod = JS("function(rows, columnId, filterValue) {
+        return rows.filter(function(row) {
+          var cellValue = row.values[columnId].toString().toLowerCase();
+          var filterText = filterValue.toLowerCase();
+          return cellValue.indexOf(filterText) !== -1;
+        })
+      }")
+    ),
+    year = colDef(
+      filterable = TRUE
+    ),
+    month = colDef(
+      filterable = TRUE
+    )
+  ), defaultPageSize = 5)
+```
+
+### (iv) Data Validation
+
+The `validate` package is used here to ensure that there aren't any glaring outliers or problems needing to be sorted.\
+Here are the set of rules passed onto the `validate` package:
+
+-   `year` must be between 1850 and the current year
+
+-   `month` can only be integers between 1 and 12
+
+-   `latitude` can only be between 49.9 and 60.9
+
+-   `longitude` can only be between -8 and 2
+
+-   `altitude` can only be between -2.75 and 1343
+
+-   `temperature` can only be between -50 and 50
+
+-   `af_inmth` can only be an integer between 1 and 31
+
+-   `sun` and `rain` can only be float between 0 and 1000
+
+-   `sun_sensor` can only be one of 2 possible sensors
+
+```{r Data Validation with known information}
+suppressPackageStartupMessages(library(validate)) 
+# To perform quick data validation
+
+# Validation rules
+rules <- validator(
+  # Check station name length and type
+  if (any(!is.na(station))) is.character(station),
+  
+  # Year constraints
+  year >= 1850,
+  year <= as.numeric(format(Sys.Date(), "%Y")), # Current year
+  
+  # Month constraints
+  month >= 1,
+  month <= 12,
+  
+  # Latitude and Longitude constraints (UK grid limits)
+  latitude >= 49.9,
+  latitude <= 60.9,
+  longitude >= -8,
+  longitude <= 2,
+  
+  # Altitude constraints (Lowest and highest points in the UK)
+  altitude >= -2.75,
+  altitude <= 1343,
+  
+  # Temperature, af_inmth, rain, and sun constraints
+  t_min >= -50,
+  t_min <= 50,
+  t_max >= -50,
+  t_max <= 50,
+  af_inmth >= 1,
+  af_inmth <= 31,
+  rain >= 0,
+  rain <= 1000,
+  sun >= 0,
+  sun <= 1000,
+  
+  # sun_sensor and provisional/estimated checks
+  is.element(sun_sensor, c("Campbell Stokes", "Kipp & Zonen")),
+  
+  # Boolean checks
+  is.logical(tmin_est),
+  is.logical(tmax_est),
+  is.logical(af_est),
+  is.logical(rain_est),
+  is.logical(sun_est),
+  is.logical(provisional),
+  
+  # NA checks for sun and sun_sensor
+  if (any(is.na(sun))) is.na(sun_sensor)
+)
+
+# Validate the dataframe
+results <- confront(weather, rules)
+results_summary <- summary(results)
+
+# Calculate the total number of fails
+total_fails <- sum(results_summary$violations)
+
+# Print the total number of fails
+print(paste("Total number of validation rule failures:", total_fails))
+
+```
+
+Following the data validation process, it was essential to confirm the accuracy of the `longitude` and `latitude` coordinates. To achieve this, I plotted all coordinate values on a map for visual verification against their corresponding station names, ensuring their positions aligned precisely with real-world locations.
+
+```{r Example: Create Map to visualise rainfall in 2023 for all stations}
+suppressPackageStartupMessages(library(leaflet))
+# for interactive maps
+
+# This section aims to create an interactive map which shows the rainfall for all stations in 2023
+
+yearly_averages <- weather %>%
+  filter(year == 2023) %>% ### SWITCH THE DESIRED YEAR HERE AND RERUN THIS CHUNK ###
+  group_by(station, year, latitude, longitude) %>%
+  summarise(
+    average_rain = round(mean(rain, na.rm = TRUE),2),
+    .groups = 'drop'  
+  )
+
+# Define a custom color palette
+custom_palette  <- colorNumeric(
+  palette = rev(c("#566f97","#566f97","#cbd2c0", "#b77d34")), 
+  domain = c(min(yearly_averages$average_rain, na.rm = TRUE), max(yearly_averages$average_rain, na.rm = TRUE))
+)
+
+legend_breaks <- pretty(range(yearly_averages$average_rain, na.rm = TRUE), n = 5)
+legend_labels <- sprintf("%.2f mm", legend_breaks)
+
+# Create a basic leaflet map
+leaflet_map <- leaflet(data = yearly_averages) %>%
+  setView(lng = mean(yearly_averages$longitude), lat = mean(yearly_averages$latitude), zoom = 5) %>%
+  # Add default OpenStreetMap tiles
+  addTiles() %>%
+  # Add circle markers
+  addCircleMarkers(
+    lng = ~longitude, 
+    lat = ~latitude, 
+    # Apply custom color palette based on average_rain
+    color = ~custom_palette(average_rain), 
+    radius = 7,
+    stroke = FALSE, 
+    fillOpacity = 0.8,
+    # Popup text for each point
+    popup = ~paste("<b>", station, "</b><br>","Year:", year, "<br>Avg Rainfall (mm):", average_rain) 
+  ) %>%
+  # Add a color legend
+  addLegend(
+    position = "bottomright",
+    pal = custom_palette,
+    values = ~average_rain,
+    title = "Average Rainfall (mm)",
+    opacity = 1,
+    labFormat = labelFormat(suffix = " mm"),
+    labels = legend_labels
+  )
+
+#Its interactive! Try clicking on the circles.
+leaflet_map
+```
+
+## Part 1 : Clustering by Weather Data
+
+*Look at the weather data for each of the weather stations.*
+
+*Looking only at the weather data (that is, don't include the latitude/longitude of the weather station) can you use a clustering algorithm to see if these stations can be clustered into groups that have "similar" weather? Note that you will have multiple weather readings for each station. You could pick the most recent, an average, an extreme, or you could consider all the points individually and look for clusters in the individual observations. You should try to justify your choice.*
+
+I have decided to analyse data averaged across the operational lifespan of each station, clustering the stations based on key weather parameters: minimum temperature (`t_min`), maximum temperature (`t_max`), rainfall (`rain`), sunshine duration (`sun`), and air frost days (`af_inmth`). The k-means clustering algorithm will facilitate this process. To determine the most effective number of clusters, I will employ the elbow-plot method. This approach seeks an optimal balance between the number of clusters and the within-cluster sum of squares, aiming to minimise variance within clusters without over-fitting.
+
+Next, I planned to create a scatter plot to show the relationship between sunshine duration and air frost days, as this combination most effectively highlights the clusters. The results will be integrated into the previously mentioned map, employing color coding for each cluster to visualize their distribution across the UK. Such analysis could provide critical insights, potentially revealing how well a machine learning model can predict geographic location based solely on meteorological data. This, in turn, could significantly enhance our understanding of the complex interplay between climate variables.
+
+### (i) Finding the Optimal Number of Clusters via the Elbow Method
+
+```{r Clustering : Finding the optimal number of clusters}
+suppressPackageStartupMessages(library(cluster)) # for wss (within sum of squares) calculation
+
+set.seed(123) # For reproducibility
+
+# Create a dataframe which has one line per station,
+# And summarises [mean] all the weather variables:
+# (Min Temperature, Max Temperature, Rainfall, Sunshine, Air Frost)
+selected_data <- weather %>%
+  group_by(station) %>%
+  summarise(across(c(t_min, t_max, rain, sun, af_inmth), ~mean(., na.rm = TRUE))) %>%
+  ungroup() %>%
+  drop_na()
+
+# This dataframe is basically the same but retaining the (longitude, latitude)
+selected_data_wLocation <- weather %>%
+  group_by(station) %>%
+  summarise(across(c(t_min, t_max, rain, sun, af_inmth, longitude, latitude), ~mean(., na.rm = TRUE))) %>% 
+  # Longitude/Latitude is averaged, as some stations have two locations.
+  ungroup() %>%
+  drop_na()
+
+# Scale the data
+# The first column is 'station', which we don't scale
+scaled_data <- scale(selected_data[-1]) 
+
+# Elbow method (show 15 levels)
+wss <- sapply(2:15, function(k){
+  sum(kmeans(scaled_data, centers=k, nstart=25)$withinss) #Best of 25 runs.
+})
+
+# Elbow method shows the optimal number of clusters == 3.
+# Plot to determine the optimal number of clusters
+plot(2:15, wss, type='b', xlab='Number of Clusters', ylab='Within groups sum of squares')
+```
+
+### (ii) Cluster Plot of Sunshine (hours) against Air Frost (days)
+
+```{r Clustering : Plot of sunshine against air frost days, warning=FALSE}
+suppressPackageStartupMessages(library(ggpubr)) 
+# For better scatter plots
+
+set.seed(123)
+# Apply K-means with the chosen number of clusters, In this example, its 3.
+#### CHANGE `centers=` IF YOU WOULD LIKE TO SET MORE/LESS CLUSTERS. ####
+kmeans_result <- kmeans(scaled_data, centers=3, nstart=25)
+
+# Add the cluster results to the original data
+selected_data_wLocation <- selected_data_wLocation %>% 
+  mutate(cluster = as.factor(kmeans_result$cluster))
+
+# Analyze the clusters
+cluster_centers <- as.data.frame(kmeans_result$centers)
+
+custom_colors <- c("#003c82", "#b9945c", "#506c3f")
+
+# Plotting clusters with ggplot2 (`rain` vs `sun` in this example)
+cluster <- ggscatter(selected_data_wLocation, x = "sun", y = "af_inmth",
+          color = "cluster", palette = custom_colors,
+          shape = "cluster", 
+          ellipse = TRUE,    # Draw ellipses around clusters
+          legend = "right") + # Adjust legend position as needed
+  ggtitle("2D Scatter Plot of Clusters based on sunshine against air frost days") +
+  theme_minimal() +
+  labs(color = "Cluster")
+  
+cluster
+```
+
+### (iii) Updating the Map of the Weather Stations, Now Coloured by Cluster.
+
+```{r Create an interactive map based on the clusters.}
+# Function to return the color based on the cluster number
+getClusterColor <- function(cluster_number) {custom_colors[cluster_number]}
+
+# Create a leaflet map using the custom color palette
+og_cluster_map <- 
+  leaflet(selected_data_wLocation) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    color = ~getClusterColor(cluster),
+    popup = ~paste(
+      "<b>", station, "</b><br>",
+      "Cluster: ", cluster, "<br>",
+      "Min Temp: ", sprintf("%.2f",t_min), "°C<br>",
+      "Max Temp: ", sprintf("%.2f",t_max), "°C<br>",
+      "Rain: ", sprintf("%.2f",rain), " mm<br>",
+      "Sun: ", sprintf("%.2f",sun), " hours<br>",
+      "Air Frost Days: ", sprintf("%.2f", af_inmth)," days<br>",
+      "Longitude: ", longitude, "<br>",
+      "Latitude: ", latitude
+    ),  
+    opacity = 1, fillOpacity = 1, radius = 4
+  ) %>%
+  addLegend(
+    'bottomright',
+    colors = custom_colors, labels = c("1", "2", "3"), 
+    title = 'Cluster', 
+    opacity = 1)
+
+# Another interactive map. Click the circles to see MetOffice Data.
+og_cluster_map
+```
+
+### (iv) Weather Characteristics of Each Cluster
+
+In order to quantify the characteristics of each cluster, here is the tabular breakdown of where the cluster centers lie with regards to `t_min`, `t_max`, `rain`, `sun` and `af_inmth`.
+
+#### **Cluster 1 (`Blue`)**
+
+-   *Geographical Spread*: Predominantly covering Scotland and parts of Northern England.
+
+-   *Temperature*: Exhibits cooler temperatures, with lower minimum (**`t_min`**) and maximum (**`t_max`**) temperature values.
+
+-   *Rainfall*: Moderate amounts of rainfall, slightly higher than the southern cluster but less than the forested areas.
+
+-   *Sunshine*: The least amount of sunshine compared to the other clusters, which is consistent with regions that are farther north.
+
+-   *Air Frost*: Occurrences of air frost (**`af_inmth`**) are relatively infrequent but not as rare as in the southern cluster.
+
+#### **Cluster 2 (`Brown`)**
+
+-   *Geographical Spread*: Mainly located in the south of the UK, including London and surrounding areas.
+
+-   Temperature: Warmer temperatures with the highest **`t_min`** and **`t_max`** values, which is characteristic of the more temperate southern regions.
+
+-   *Rainfall*: This cluster experiences the least rainfall, indicating drier conditions.
+
+-   *Sunshine*: Receives the most sunshine, aligning with southern areas typically enjoying more sunny days.
+
+-   *Air Frost*: The occurrence of air frost is the least within this cluster, fitting the pattern of milder winters in the south.
+
+#### **Cluster 3 (`Green`)**
+
+-   *Geographical Spread*: Scattered, but likely represents weather stations in forested regions, possibly in areas of variable elevation.
+
+-   *Temperature*: This cluster has the most significant deviation in both minimum and maximum temperatures, suggesting a wide range of conditions, possibly due to varied terrain and canopy cover in forests.
+
+-   *Rainfall*: Substantially higher rainfall, the highest among the clusters, which is typical for forested and potentially upland areas.
+
+-   *Sunshine*: Less sunshine, which could be due to factors such as increased cloud cover and shading from trees.
+
+-   *Air Frost*: A very high frequency of air frost incidents, indicating that these stations might be in areas prone to colder conditions, especially at night or during certain months.
+
+`Cluster 1` represents the cooler, moderately wet, and less sunny conditions typical of the north.\
+`Cluster 2` showcases the milder, drier, and sunnier climate of the southern UK.\
+Lastly, `Cluster 3` indicates areas with significant rainfall, varied temperatures, and more frequent frost, likely associated with forested and diverse terrain.
+
+```{r}
+# This section breaks down the descriptives of each cluster.
+cluster_centers
+```
+
+## Part 2 : Multi-Class Classification Problem (Predicting North, Middle South from Weather Data)
+
+*You should exclude 5 of the weather stations from this set.\
+(You could do this by picking the last 5 stations alphabetically).*
+
+*Can you predict whether they fall in the Northern third of the UK, Central third of the UK or the Southern third of the UK using only the weather data? You have latitude data for all the weather stations, so that can give you the classification for each of the weather stations in your training set. To determine the latitude of the lines dividing the UK into three, you should note that the most northerly point has a latitude of 60.9 and the most southerly point has a latitude of 49.9.*
+
+### (i) Updating the Cluster Map to show the latitude split lines: (North/Middle/South)
+
+It's crucial to note how the clusters align with the divisional latitude lines of North, Middle, and South. We enhance the cluster map by incorporating these lines for a clearer geographical context.
+
+To streamline the process, we've optimized for automation; modifying the **`number_of_equal_regions`** variable allows for easy adjustment of the divisional criteria.
+
+The resultant map reveals a machine learning model's potential proficiency in distinguishing between `Southern` and `Northern` stations, yet indicates a possible challenge in differentiating Middle region stations from those in adjacent areas. This insight underscores the nuanced ability of the model to interpret geographical nuances based on meteorological data.
+
+```{r Show a Map of the number of regions that the UK will be split up into.}
+                  ##SET THE NUMBER OF EQUAL REGIONS REQUIRED HERE##
+                           number_of_equal_regions = 3 
+                  ##SET THE NUMBER OF EQUAL REGIONS REQUIRED HERE##
+
+# Define the most southerly and northerly latitudes
+southerly <- 49.9
+northerly <- 60.9
+
+# Calculate the total range and the size of each group
+total_range <- northerly - southerly
+group_size <- total_range / number_of_equal_regions
+
+# Create dynamic breaks and labels based on number_of_equal_regions
+breaks <- seq(from = southerly, to = northerly, by = group_size)
+
+# Generate dynamic labels. if 2 regions, N/S, if 3, N/M/S, if >3, numeric labels.
+if(number_of_equal_regions == 2) {
+  labels <- c("South", "North")
+} else if(number_of_equal_regions == 3) {
+  labels <- c("South", "Middle", "North")
+} else {
+  labels <- as.character(seq(1, number_of_equal_regions))
+}
+
+#Draws the northerly and southerly latitude lines
+cluster_map <- og_cluster_map %>%
+  # Add lines at specific latitudes
+  addPolylines(lng = c(-10, 2), lat = c(southerly, southerly), color = "blue", weight = 2) %>%
+  addPolylines(lng = c(-10, 2), lat = c(northerly, northerly), color = "blue", weight = 2)
+
+# Loop through each region to add the break polylines at the appropriate place.
+for(i in 1:length(breaks)) {
+  lat <- breaks[i]
+  color <- ifelse(i == 1 | i == length(breaks), "blue", "red")
+  cluster_map <- cluster_map %>%
+    addPolylines(lng = c(-10, 2),
+                 lat = c(lat, lat),
+                 color = color,
+                 weight = 2)
+}
+
+cluster_map
+```
+
+### (ii) Finalising the Dataframe; and Splitting the Dataset into the Training and Testing set.
+
+We start by finalizing the dataframe that will serve as the foundation for training our model. Recognising that a single data point per station would insufficiently support the development of a statistically robust model, I have opted to include one record for each station per year instead. However, in alignment with the assignment's guidelines, the year variable will not be incorporated into the training process, focusing solely on weather data as predictors.
+
+Following the assignment's recommendation, the last five stations, when sorted alphabetically, will be set aside for model validation. The data designated for training will be stored in the **`region_train`** dataframe, while the data for the stations allocated for testing will be maintained in the **`region_test`** dataframe. This approach ensures a clear separation between training and testing datasets, facilitating a more accurate assessment of the model's predictive capabilities.
+
+```{r Preparing DataFrame for Model Training}
+suppressPackageStartupMessages(library(tidymodels)) 
+# For training a multiclass classification rf model
+
+#Creates a df which has one line per station and year. (3310 obs.)
+weather_stations <- weather %>%
+  group_by(station, year) %>%
+  reframe(t_min = mean(t_min, na.rm = T),
+            t_max = mean(t_max, na.rm = T),
+            rain = mean(rain, na.rm = T),
+            sun = mean(sun, na.rm = T),
+            af = mean(af_inmth, na.rm = T),
+            longitude = mean(longitude, na.rm = T),
+            latitude = mean(latitude, na.rm = T)) %>%
+  distinct(station, year, .keep_all = T) %>%
+  ungroup() %>%
+  select(-year)
+
+# Use mutate and cut to create a new column 'region'
+# This process is fully automated based on the calculations above.
+weather_stations_prep <- weather_stations %>%
+  mutate(region = cut(latitude, 
+                      breaks = breaks,
+                      labels = labels,
+                      include.lowest = TRUE)) %>%
+  select(-longitude, -latitude)
+
+# Sort stations in alphabetical order
+stations <- sort(unique(weather_stations_prep$station))
+# Select the last 5 stations [alphabetically] for the test set (as recommended)
+stations_test <- tail(stations, 5)
+# Use the remaining stations for the training set
+stations_train <- setdiff(stations, stations_test)
+
+# Split the main dataframes
+region_train <- weather_stations_prep %>% 
+  filter(station %in% stations_train)
+region_test <- weather_stations_prep %>% 
+  filter(station %in% stations_test)
+```
+
+### (iii) Using the `TidyModels` Library to streamline the Model Training Process.
+
+I will be utilising the `tidymodels` package to make this model training process as streamlined as possible. Typically, the `rsample::initial_split` function is used to proportionately create training and testing sets. However, as we are specifing custom, pre-determined groups for the training and testing sets, the `rsample::make_splits` function is used instead:
+
+```{r Using rsample::make_splits() to apply this custom train/test split}
+# This is the way to create an rsplit object with custom train/test splits
+region_split <- make_splits(x = region_train, assessment = region_test)
+region_split
+
+region_train <- training(region_split)
+region_test <- testing(region_split)
+```
+
+To mitigate the risk of overfitting and enhance the model's generalisability, implementing a 20-fold cross-validation is an industry standard. The **`rsample::vfold_cv`** function within the tidymodels framework facilitates this process. By specifying the training dataset, this function automatically partitions it into 20 subsets, or "folds". During the cross-validation process, the model will be trained on 19 folds and tested on the remaining fold. This cycle repeats 20 times, each time with a different fold serving as the test set, ensuring that every data point is used for both training and validation at least once.
+
+This approach not only helps in reducing the likelihood of overfitting but also provides a more accurate estimate of the model's performance on unseen data.
+
+```{r Using rsample::vfold_cv() to set up 20 fold Cross-Validation}
+set.seed(234)
+# Setting up 20 fold cross validation to prevent overfitting.
+region_folds <- vfold_cv(region_train, v = 20)
+region_folds
+
+```
+
+A `tidymodels` `recipe` is now specified.
+
+A `recipe` defines preprocessing steps for both training and testing datasets, avoiding data leakage:
+
+-   The station variable is marked as an identifier, not a predictor.
+
+-   Missing data is imputed using K-nearest-neighbours (default = 3).
+
+-   Variables with zero variance are removed.
+
+-   All variables are scaled for uniformity.
+
+-   "Juicing" the recipe applies these steps, readying the data for model training.
+
+```{r Setting up a TidyModels Pre-Processing Recipe}
+region_rec <- recipe(region ~ ., data = region_train) %>% # formula
+  update_role(station, new_role = "ID") %>% # ensure station name used as ID
+  step_impute_knn(all_predictors()) %>% # imputing missing data with knn
+  step_zv(all_predictors()) %>% # removing variables with zero variance
+  step_normalize(all_predictors()) # scaling the variables
+
+region_prep <- prep(region_rec) # preparing the recipe
+
+juice(region_prep) %>% # What the df looks like after pre-processing steps
+  group_by(station) %>% 
+  sample_n(size = 2, replace = FALSE) %>% # Show 2 per station
+  ungroup()
+```
+
+A random forest model is specified here with an adequate number of trees.
+
+```{r Specifing a randomforest model}
+rf_spec <- rand_forest(trees = 200) %>% #Setting an adequate number of trees
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+rf_spec
+```
+
+The model training workflow is described here, adding the recipe and model to the workflow.
+
+```{r Adding the Recipe and Model Specification to the Workflow}
+region_wf <- workflow() %>%
+  add_recipe(region_rec) %>%
+  add_model(rf_spec)
+
+region_wf
+```
+
+This is the final step which fits the training data to the model.
+
+```{r Fitting the Training Data}
+rf_rs <- region_wf %>%
+  fit_resamples(
+    resamples = region_folds,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+rf_rs # results of the split for each cross-validation set
+```
+
+### (iv) Evaluating the Trained RandomForest Model (with the training data).
+
+This section assesses the model's accuracy in predicting the stations involved in the training phase.
+
+It reveals that the model misclassified only two stations, indicating a high level of predictive accuracy for the training dataset.
+
+```{r [TRAINING] Summary Table showing the prediction residuals per station}
+region_pred <- rf_rs %>%
+  collect_predictions() %>% # Get the predictions
+  mutate(correct = region == .pred_class) %>% # Create new column which reports if the prediction was correct or not.
+  left_join(weather_stations_prep %>% mutate(.row = row_number()), by = c(".row", "region")) %>% # Adds the original dataframe onto the prediction df
+  select(-id, -.row, -.config) %>%
+  select(station, region, .pred_class, correct, t_min, t_max, rain, sun, af, starts_with(".pred")) 
+
+region_pred_summary <- region_pred %>% # Generating a Summary table for all the predictions PER STATION.
+  group_by(station) %>%
+  reframe(region = region,
+          .pred_South = mean(.pred_South, na.rm = T),
+          .pred_Middle = mean(.pred_Middle, na.rm = T),
+          .pred_North = mean(.pred_North, na.rm = T)
+          ) %>% # Summarizing all the prediction residuals
+  ungroup() %>%
+  distinct(station, .keep_all = T) %>% # Drop all the duplicate rows
+  rowwise() %>%
+  mutate(prediction = names(select(., .pred_South, .pred_Middle, .pred_North))[which.max(c_across(c(.pred_South, .pred_Middle, .pred_North)))] ) %>% 
+  #Creates a new column which basically returns the column name which has the highest residual between .pred_South, .pred_Middle and .pred_North
+  ungroup() %>%
+  mutate(prediction = str_remove(prediction, "^\\.pred_")) %>% #Removes the .pred_ so we just get the region
+  relocate(prediction, .before = region) %>% 
+  mutate(correct = region == prediction) %>% # Correct will be true if prediction == region
+  relocate(correct, .before = .pred_South) %>%
+  arrange(correct) %>% #Makes sure wrong predictions get brought to the top
+  mutate(prediction = factor(prediction, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")),
+         region = factor(region, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")))
+
+region_pred_summary %>% print(n=32)
+```
+
+The model's accuracy is excellent at 93.8%, with a sensitivity of 87.0% and a specificity of 96.8%.
+
+```{r [TRAINING] Collecting the model metrics.}
+# Calculate accuracy and store it as a data frame
+accuracy_df <- accuracy(region_pred_summary, truth = region, estimate = prediction) %>% 
+  as.data.frame() %>% 
+  mutate(metric = "accuracy")
+
+# Calculate positive predictive value (PPV) and store it as a data frame
+sensitivity_df <- sensitivity(region_pred_summary, truth = region, estimate = prediction) %>% 
+  as.data.frame() %>% 
+  mutate(metric = "sensitivity")
+
+specificity_df <- specificity(region_pred_summary, truth = region, estimate = prediction) %>% 
+  as.data.frame() %>% 
+  mutate(metric = "specificity")
+
+# Combine both data frames into one table
+combined_metrics <- bind_rows(accuracy_df, sensitivity_df, specificity_df) %>%
+  select(metric, -.metric, .estimator, .estimate)
+
+combined_metrics
+
+```
+
+Here is the confusion matrix of the stations used in the training set, when applied to the model, showing excellent classification ability.
+
+```{r [TRAINING] Averaged confusion matrix per station}
+conf_mat(region_pred_summary, truth = region, estimate = prediction)
+```
+
+Running a quick variable importance analysis with the `vip` package shows that the key factors which help the model make its decision is the maximum temperature value and the minimum temperature values.
+
+```{r [TRAINING] Variable Importance Analysis}
+suppressPackageStartupMessages(library(vip))
+
+rf_spec %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(
+    region ~ .,
+    data = juice(region_prep) %>% 
+      select(-station) %>%
+      janitor::clean_names()
+  ) %>%
+  vip(geom = "point")
+```
+
+### (v) Evaluating the Trained RandomForest Model (with the unseen testing data).
+
+```{r Fitting the 5 stations against the model}
+region_final <- region_wf %>% # Applying the model on the testing data is a simple process in TidyModels.
+  last_fit(region_split)
+```
+
+Here, we can see that out of the 5 stations, the model managed to accurately determine the region of 4 of these stations.
+
+```{r [TESTING] Summary Table showing the prediction residuals per station.}
+region_final_pred <- region_final %>%
+  collect_predictions() %>%
+  mutate(correct = region == .pred_class) %>%
+  left_join(weather_stations_prep %>% mutate(.row = row_number()), by = c(".row", "region")) %>%
+  select(-id, -.row, -.config) %>%
+  select(station, region, .pred_class, correct, t_min, t_max, rain, sun, af, starts_with(".pred"))
+
+region_final_pred_summary <- region_final_pred %>% # Generating a Summary table for all the predictions PER STATION.
+  group_by(station) %>%
+  reframe(region = region,
+          .pred_South = mean(.pred_South, na.rm = T),
+          .pred_Middle = mean(.pred_Middle, na.rm = T),
+          .pred_North = mean(.pred_North, na.rm = T)
+          ) %>% # Summarizing all the prediction residuals
+  ungroup() %>%
+  distinct(station, .keep_all = T) %>% # Drop all the duplicate rows
+  rowwise() %>%
+  mutate(prediction = names(select(., .pred_South, .pred_Middle, .pred_North))[which.max(c_across(c(.pred_South, .pred_Middle, .pred_North)))] ) %>% 
+  #Creates a new column which basically returns the column name which has the highest residual between .pred_South, .pred_Middle and .pred_North
+  ungroup() %>%
+  mutate(prediction = str_remove(prediction, "^\\.pred_")) %>% #Removes the .pred_ so we just get the region
+  relocate(prediction, .before = region) %>% 
+  mutate(correct = region == prediction) %>% # Correct will be true if prediction == region
+  relocate(correct, .before = .pred_South) %>%
+  arrange(correct) %>% #Makes sure wrong predictions get brought to the top
+  mutate(prediction = factor(prediction, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")),
+         region = factor(region, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")))
+
+region_final_pred_summary
+```
+
+The model's performance on the testing data, as indicated by an accuracy of 80%, with a sensitivity of 67% and a specificity of 83.3%, confirms its generalisability. These metrics suggest the model is likely to remain effective in classifying other unseen stations, maintaining a balance between correctly identifying true positives (sensitivity) and true negatives (specificity).
+
+```{r [TESTING] Collecting the testing metrics.}
+accuracy_df <- accuracy(region_final_pred_summary, truth = region, estimate = prediction) %>% 
+  as.data.frame() %>% 
+  mutate(metric = "accuracy")
+
+# Calculate positive predictive value (PPV) and store it as a data frame
+sensitivity_df <- sensitivity(region_final_pred_summary, truth = region, estimate = prediction) %>% 
+  as.data.frame() %>% 
+  mutate(metric = "sensitivity")
+
+specificity_df <- specificity(region_final_pred_summary, truth = region, estimate = prediction) %>% 
+  as.data.frame() %>% 
+  mutate(metric = "specificity")
+
+# Combine both data frames into one table
+combined_final_metrics <- bind_rows(accuracy_df, sensitivity_df, specificity_df) %>%
+  select(metric, -.metric, .estimator, .estimate)
+
+combined_final_metrics
+```
+
+```{r [TESTING] Averaged confusion matrix per station}
+conf_mat(region_final_pred_summary, truth = region, estimate = prediction)
+```
+
+## Part 3 : Real World Happiness Data from ONS
+
+*The Office for National Statistics collects and publishes data on how happy people think they are. This is self-reported data, so it may well have some inherent biases, but it is good enough for us to draw some general conclusions. Happiness is measured on a scale of 0-10. Let's try to answer the question as to whether the weather affects how happy we are.*
+
+*Try to join the weather station data with the happiness data. You will only be able to do this in a coarse-grained way, because the places where there are weather stations do not correspond directly to the census areas used in the happiness surveys. You could use bands of latitude to do this, or you could put a grid over the country and look at which grid cell a weather station or census region falls in. Don't worry too much about the fact that weather data and census data don't cover exactly the same time periods; for the purposes of this assessment, we can assume that to a first approximation the general climate at a given weather station is fairly constant over time and that happiness also does not change too much from year to year.*
+
+### (i) Importing Happiness Data from ONS into R
+
+To streamline the process with automation, crafting a function in R that directly imports data from a specified URL is an efficient approach. This function will take the URL as an input parameter and return the imported dataset, ready for further analysis.
+
+```{r Creating a function which imports Happiness Data directly from the URL}
+library(httr)
+library(readxl)
+
+# Define the function to download and read an Excel file directly from a URL
+read_excel_from_url <- function(url) {
+  # Use httr to handle the HTTP GET request
+  response <- GET(url)
+  
+  # Check if the request was successful
+  if (status_code(response) != 200) {
+    stop("Failed to download the file: HTTP status code ", status_code(response))
+  }
+  
+  # Use httr's content function to access the file content
+  # and readxl's read_excel to read the content into R
+  # The tempfile() function is used to create a temporary file on disk
+  # This way, its not dependent on storage, making it more automated.
+  temp_file <- tempfile(fileext = ".xls")
+  writeBin(content(response, "raw"), temp_file)
+  data <- suppressMessages(read_excel(temp_file, 
+                     sheet = "Happiness", 
+                     skip = 6, # Assumes all Data starts on line 7
+                     col_names = FALSE, 
+                     na = "x",
+                     progress = FALSE))
+    unlink(temp_file)
+  
+  # Return the data frame
+  return(data)
+}
+```
+
+Next, all the data is imported from the specified URLs in:\
+`S_Happiness1415`, `S_Happiness1314`, `S_Happiness1213` and `S_Happiness1112`.
+
+```{r Import the Happiness Data from URLs, echo=TRUE, results='hide'}
+library(readxl)
+
+S_Happiness1415 <- read_excel_from_url("https://www.ons.gov.uk/file?uri=/peoplepopulationandcommunity/wellbeing/datasets/personalwellbeingestimatesgeographicalbreakdown/201415/geographicbreakdownreferencetable_tcm77-417203.xls")
+
+S_Happiness1314 <- read_excel_from_url("https://www.ons.gov.uk/file?uri=/peoplepopulationandcommunity/wellbeing/datasets/personalwellbeingestimatesgeographicalbreakdown/201314/referencetable1geographicalbreakdown_tcm77-378058.xls")
+  
+S_Happiness1213 <- read_excel_from_url("https://www.ons.gov.uk/file?uri=/peoplepopulationandcommunity/wellbeing/datasets/personalwellbeingestimatesgeographicalbreakdown/201213/20122013referencetable_tcm77-332116.xls")
+
+S_Happiness1112 <- read_excel_from_url("https://www.ons.gov.uk/file?uri=/peoplepopulationandcommunity/wellbeing/datasets/personalwellbeingestimatesgeographicalbreakdown/201112/20112012referencetabletcm77332122.xls")
+
+#Column names for all these files are specified here.
+colnames(S_Happiness1415) <- c("area_code", "areaA", "areaB", "areaC", "low_perc1415", "med_perc1415", "high_perc1415", "v_high_perc1415", "mean_rating1415", "low_cv", "low_llim", "low_ulim", "med_cv", "med_llim", "med_ulim", "high_cv", "high_llim", "high_ulim", "vhigh_cv", "vhigh_llim", "vhigh_ulim", "mean_cv1415", "mean_llim", "mean_ulim", "sample_size")
+
+colnames(S_Happiness1314) <- c("area_code", "areaA", "areaB", "areaC", "low_perc1314", "med_perc1314", "high_perc1314", "v_high_perc1314", "mean_rating1314", "low_cv", "low_llim", "low_ulim", "med_cv", "med_llim", "med_ulim", "high_cv", "high_llim", "high_ulim", "vhigh_cv", "vhigh_llim", "vhigh_ulim", "mean_cv1314", "mean_llim", "mean_ulim", "sample_size")
+
+colnames(S_Happiness1213) <- c("area_code", "areaA", "areaB", "areaC", "low_perc1213", "med_perc1213", "high_perc1213", "v_high_perc1213", "mean_rating1213", "mean_sd", "low_cv", "low_llim", "low_ulim", "med_cv", "med_llim", "med_ulim", "high_cv", "high_llim", "high_ulim", "vhigh_cv", "vhigh_llim", "vhigh_ulim", "mean_cv1213", "mean_llim", "mean_ulim", "sample_size")
+
+colnames(S_Happiness1112) <- c("area_code", "areaA", "areaB", "areaC", "low_perc1112", "med_perc1112", "high_perc1112", "v_high_perc1112", "mean_rating1112", "mean_sd", "low_cv", "low_llim", "low_ulim", "med_cv", "med_llim", "med_ulim", "high_cv", "high_llim", "high_ulim", "vhigh_cv", "vhigh_llim", "vhigh_ulim", "mean_cv1112", "mean_llim", "mean_ulim", "sample_size")
+
+S_Happiness1415 <- S_Happiness1415 %>%
+  fill(areaA, .direction = "down") %>% #fill down the wider areas
+  mutate(areaB = if_else(is.na(areaB) & is.na(areaC), "<-", areaB)) %>%
+  fill(areaB, .direction = "down") %>% #fill down the wider areas
+  mutate(areaB = str_replace(areaB, "<-", NA_character_)) %>%
+  mutate(areaB = str_remove(areaB, " UA")) %>%
+  mutate(areaB = str_remove(areaB, " \\(Met County\\)")) %>%  
+  mutate(areaB = str_remove(areaB, ", Orkney & Shetland")) %>%
+  mutate(areaB = str_c(areaB, ", United Kingdom")) %>%
+  mutate(areaC = str_c(areaC, ", United Kingdom")) # Better for tidygeocoder
+
+S_Happiness1314 <- S_Happiness1314 %>%
+  select(area_code, mean_rating1314, mean_cv1314, low_perc1314, med_perc1314, high_perc1314, v_high_perc1314)
+
+S_Happiness1213 <- S_Happiness1213 %>%
+  select(area_code, mean_rating1213, mean_cv1213, low_perc1213, med_perc1213, high_perc1213, v_high_perc1213)
+
+S_Happiness1112 <- S_Happiness1112 %>%
+  select(area_code, mean_rating1112, mean_cv1112, low_perc1112, med_perc1112, high_perc1112, v_high_perc1112)
+
+```
+
+### (ii) Use the Nominatim API to query longitude/latitude for each region in the 2014/15 sheet.
+
+Due to request limits from Nominatim, this section of code should take at least 7 minutes to execute.
+
+```{r Importing Longitude Latitude Data for all areaB and areaC (tidygeocoder)}
+library(tidygeocoder)
+# Using Nominatim API to get longitude/latitude from addresses.
+# This section will take approximately 7 minutes to run due to request limits.
+lat_longs_B1415 <- S_Happiness1415 %>%
+  select(areaB) %>%
+  drop_na() %>%
+  geocode(areaB, method = 'osm', lat = latitude , long = longitude)
+
+lat_longs_C1415 <- S_Happiness1415 %>%
+  select(areaC) %>%
+  drop_na() %>%
+  geocode(areaC, method = 'osm', lat = latitude , long = longitude)
+
+```
+
+### (iii) Data Cleaning to Produce the Final Working Dataframe with All Variables of Interest.
+
+```{r Handle the data and import it into the final dataset, error=FALSE, warning=FALSE, include=TRUE}
+#Merging the Longitudes and Latitudes to the main dataframe.
+S_Happiness1415 <- left_join(S_Happiness1415, lat_longs_B1415, by = c("areaB")) 
+S_Happiness1415 <- left_join(S_Happiness1415, lat_longs_C1415, by = c("areaC"))
+
+# Ensure that there are no entries without 'mean_rating'
+S_Happiness1415 <- S_Happiness1415 %>%
+  distinct() %>%
+  drop_na(mean_rating1415)
+
+Mean_S_Happiness1415_areaA <- S_Happiness1415 %>%
+  group_by(areaA) %>% # For each areaA,
+  # I am calculating the mean center of all the subregions myself.
+  # As the area is regional areas are small, we will assume the Earth is flat here.
+  summarise(longitude.a = mean(longitude.y, na.rm = T),
+            latitude.a = mean(latitude.y, na.rm = T)) %>%
+  filter(longitude.a != "NaN")
+
+S_Happiness1415 <- left_join(S_Happiness1415, Mean_S_Happiness1415_areaA, by = c("areaA"))
+
+S_Happiness1415 <- S_Happiness1415 %>%
+  mutate(
+    latitude = case_when(
+      !is.na(latitude.y) ~ latitude.y,
+      is.na(latitude.y) & !is.na(latitude.x) ~ latitude.x,
+      is.na(latitude.y) & is.na(latitude.x) & !is.na(latitude.a) ~ latitude.a,
+      TRUE ~ as.numeric(NA)  # This line is actually redundant, as NA would be the default, but included for clarity.
+    ),
+    longitude = case_when(
+      !is.na(longitude.y) ~ longitude.y,
+      is.na(longitude.y) & !is.na(longitude.x) ~ longitude.x,
+      is.na(longitude.y) & is.na(longitude.x) & !is.na(longitude.a) ~ longitude.a,
+      TRUE ~ as.numeric(NA)  # Same as above, included for clarity.
+    )) %>%
+  select(-latitude.a, -latitude.x, -latitude.y, -longitude.a, -longitude.x, -longitude.y)
+
+S_Happiness <- left_join(S_Happiness1415, S_Happiness1314, by = "area_code")
+S_Happiness <- left_join(S_Happiness, S_Happiness1213, by = "area_code")
+S_Happiness <- left_join(S_Happiness, S_Happiness1112, by = "area_code")
+```
+
+```{r Finalising working dataframe "happiness", warning=FALSE}
+#This allows you to better understand the columns which are present in the df
+Happiness <- S_Happiness %>%
+  transmute(
+    area_code = as.character(area_code), #area code
+    areaA = as.character(areaA), # Widest area zone
+    areaB = as.character(areaB), # Narrower zone than areaA
+    areaC = as.character(areaC), # Narrower zone than areaB
+    low_perc1415 = as.numeric(low_perc1415), # Percentage who scored Low
+    med_perc1415 = as.numeric(med_perc1415), # Percentage who scored Med
+    high_perc1415 = as.numeric(high_perc1415), # Percentage who scored High
+    v_high_perc1415 = as.numeric(v_high_perc1415), # Percentage who scored Very High
+    low_perc1314 = as.numeric(low_perc1314), # Percentage who scored Low
+    med_perc1314 = as.numeric(med_perc1314), # Percentage who scored Med
+    high_perc1314 = as.numeric(high_perc1314), # Percentage who scored High
+    v_high_perc1314 = as.numeric(v_high_perc1314), # Percentage who scored Very High
+    low_perc1213 = as.numeric(low_perc1213), # Percentage who scored Low
+    med_perc1213 = as.numeric(med_perc1213), # Percentage who scored Med
+    high_perc1213 = as.numeric(high_perc1213), # Percentage who scored High
+    v_high_perc1213 = as.numeric(v_high_perc1213), # Percentage who scored Very High
+    low_perc1112 = as.numeric(low_perc1112), # Percentage who scored Low
+    med_perc1112 = as.numeric(med_perc1112), # Percentage who scored Med
+    high_perc1112 = as.numeric(high_perc1112), # Percentage who scored High
+    v_high_perc1112 = as.numeric(v_high_perc1112), # Percentage who scored Very High
+    mean_rating1415 = as.numeric(mean_rating1415), # Mean Happiness Rating 1415
+    mean_rating1314 = as.numeric(mean_rating1314), # Mean Happiness Rating 1314
+    mean_rating1213 = as.numeric(mean_rating1213), # Mean Happiness Rating 1213
+    mean_rating1112 = as.numeric(mean_rating1112), # Mean Happiness Rating 1112
+    low_cv = as.numeric(low_cv),
+    low_cv = as.numeric(low_cv), # Variation for Low
+    low_llim = as.numeric(low_llim),
+    low_ulim = as.numeric(low_ulim),
+    med_cv = as.numeric(med_cv), # Variation for Med
+    med_llim = as.numeric(med_llim),
+    med_ulim = as.numeric(med_ulim),
+    high_cv = as.numeric(high_cv), # Variation for High
+    high_llim = as.numeric(high_llim),
+    high_ulim = as.numeric(high_ulim),
+    vhigh_cv = as.numeric(vhigh_cv), # Variation for Very High
+    vhigh_llim = as.numeric(vhigh_llim),
+    vhigh_ulim = as.numeric(vhigh_ulim),
+    mean_cv1415 = as.numeric(mean_cv1415), # Mean Variation 1415
+    mean_cv1314 = as.numeric(mean_cv1314), # Mean Variation 1314
+    mean_cv1213 = as.numeric(mean_cv1213), # Mean Variation 1213
+    mean_cv1112 = as.numeric(mean_cv1112), # Mean Variation 1112
+    mean_llim = as.numeric(mean_llim),
+    mean_ulim = as.numeric(mean_ulim),
+    sample_size = as.numeric(sample_size), # Sample Size
+    latitude = as.numeric(latitude), # Latitude based on the narrowest Area
+    longitude = as.numeric(longitude) # Longitude based on the narrowest Area
+  ) %>%
+  # Calculating the mean happiness rating and mean cv of the happiness rating
+  mutate(mean_rating = rowMeans(select(., mean_rating1415, mean_rating1314, mean_rating1213, mean_rating1112), na.rm = TRUE),
+         mean_cv = rowMeans(select(., mean_cv1415, mean_cv1314, mean_cv1213, mean_cv1112), na.rm = TRUE))
+```
+
+### (iv) Calculating Weighted Weather Data for Each Location; from all 37 Weather Stations.
+
+First we subset the weather dataframe to use only weather data from 5 years before and after the Happiness data median of 2013. \[Only include weather data from 2008 to 2018\]
+
+```{r Extract average weather data +- 5 years from 2013}
+
+weather_byStation <- weather %>%
+  #Filter for 5 years before and 5 years after survey median point (2013).
+  filter(year >= 2008 & year <= 2018) %>%
+  group_by(station) %>%
+  summarise(across(c(t_min, t_max, rain, sun, af_inmth, longitude, latitude), ~mean(., na.rm = TRUE))) %>% 
+  #Lon/Lat is averaged, as some stations have 2 locations (depending on the year).
+  ungroup() %>%
+  drop_na()
+```
+
+This chuck now calculates the distances between each location in the happiness dataset and each weather station using the Haversine formula, which considers the earth's curvature to provide accurate distance measurements. These distances are used to compute weights inversely proportional to the distance, ensuring that weather stations closer to a given location have a greater influence on the weather data attributed to that location. This approach will ensure that weather conditions experienced by each area will be more closely represented by nearby weather stations.
+
+After computing these weights, the script calculates weighted averages for several weather variables (e.g., minimum temperature, maximum temperature, rainfall, sunshine, and days with air frost) for each location in the happiness dataset. This is achieved by multiplying each weather variable by the corresponding weight and summing these products to get an average that accounts for the proximity and thus the relevance of each weather station's data. A high power of `5` is set here to ensure an exponentially greater weight for stations closer to the survey locations.
+
+These weighted averages are then appended to the happiness dataset as new columns. This "weather enriched" dataset `Happiness_www`, now includes location-specific, weighted weather data, provides a robust way to further analysing the relationship between weather conditions and happiness.
+
+```{r Calculate Distances and calculate weighted weather data from all stations}
+suppressPackageStartupMessages(library(geosphere)) 
+# To calculate Haversinedistances 
+
+happiness_df <- Happiness %>%
+  drop_na(latitude, longitude)
+
+weather_df <- weather_byStation
+
+# Function to calculate distances between locations in 'happiness_df' and 'weather_df' using the Haversine formula.
+calculate_distances <- function(happiness_df, weather_df) {
+  # Initialize an empty matrix with dimensions based on the number of rows in both dataframes.
+  distance_matrix <- matrix(nrow = nrow(happiness_df), ncol = nrow(weather_df))
+  # Loop through each row of 'happiness_df'
+  for (i in 1:nrow(happiness_df)) {
+    # And for each row of 'weather_df'
+    for (j in 1:nrow(weather_df)) {
+      # Calculate the distance using the Haversine formula between the two points.
+      distance_matrix[i, j] <- distHaversine(c(happiness_df$longitude[i], happiness_df$latitude[i]), 
+                                              c(weather_df$longitude[j], weather_df$latitude[j]))
+    }
+  }
+  return(distance_matrix)
+}
+
+# Calculate the distance matrix using the function defined above.
+distance_matrix <- calculate_distances(happiness_df, weather_df)
+
+# Function to calculate and normalize weights based on distances.
+# A default weight power of 5 is set here. This can be changed as desired.
+calculate_weights <- function(distance_matrix, power = 5) {
+  # Calculate weights as the inverse of distance, with a small constant added to avoid division by zero.
+  weights_matrix <- 1 / (distance_matrix + 1e-4)^power
+  # Normalize the weights for each location in 'happiness_df' such that they sum to 1.
+  weights_matrix <- weights_matrix / rowSums(weights_matrix)
+  return(weights_matrix)
+}
+
+# Calculate the weights matrix using the function defined above.
+weights_matrix <- calculate_weights(distance_matrix)
+
+# Function to calculate weighted averages for a given weather variable.
+calculate_weighted_average <- function(weather_df, weights_matrix, variable) {
+  # Use 'apply' to iterate over each row of the weights matrix.
+  weighted_averages <- apply(weights_matrix, 1, function(weights, variable) {
+    # Calculate the weighted average of the specified variable using the corresponding weights.
+    sum(weights * weather_df[[variable]])
+  }, variable = variable)
+  return(weighted_averages)
+}
+
+# Define a list of weather variables for which to calculate weighted averages.
+variables <- c('t_min', 't_max', 'rain', 'sun', 'af_inmth')
+
+# Loop over each variable to calculate weighted averages and add them to 'happiness_df' as new columns.
+for (variable in variables) {
+  # For each variable, calculate the weighted average and create a new column in 'happiness_df'.
+  happiness_df[[paste0('weighted_', variable)]] <- calculate_weighted_average(weather_df, weights_matrix, variable)
+}
+
+# Assign the modified 'happiness_df' with added weighted weather variables to a new variable for further use.
+Happiness_www <- happiness_df #Happiness with Weighted Weather
+
+#The closer the survey long/lat is to a weather station, the more that station is weighted in that location's calculated weather data.
+```
+
+These weighted averages are then appended to the happiness dataset as new columns. This "weather enriched" dataset `Happiness_www`, now includes location-specific, weighted weather data, provides a robust way to further analysing the relationship between weather conditions and happiness.
+
+### (v) Validation of Weighted Weather Values for Eastbourne
+
+This code segment performs a comparison, calculating the percentage differences between the actual weather data for `Eastbourne` and the calculated weighted weather values associated with an Eastbourne Happiness survey address.
+
+The objective is to verify that the weather data aligns closely with the true values.
+
+The observation that most values fall within a +/- 0.0001% range suggests the employed method is highly effective in approximating the actual weather conditions, thereby validating the approach's accuracy and reliability.
+
+```{r Verification of Weighted Weather Values for Eastbourne}
+# These are the real values for Eastbourne
+weather_data <- weather_byStation %>% filter(station == "Eastbourne") %>%
+  select(t_min, t_max, rain, sun, af_inmth)
+
+# Given this survey is in Eastbourne, the values should be very close to the above.
+weighted_data <- Happiness_www %>% filter(areaC == "Eastbourne, United Kingdom") %>%
+  select(weighted_t_min, weighted_t_max, weighted_rain, weighted_sun, weighted_af_inmth)
+
+# Calculate the percentage differences between all weather data.
+percentage_differences <- sapply(names(weather_data), function(var) {
+  weather_value <- weather_data[[var]]
+  weighted_value <- weighted_data[[paste0("weighted_", var)]]
+  percentage_diff <- ((weighted_value - weather_value) / weather_value) * 100
+  return(percentage_diff)
+})
+
+percentage_differences_formatted <- sapply(percentage_differences, function(x) sprintf('%.10f%%', x))
+
+# View the results.
+print(percentage_differences_formatted)
+```
+
+### (vi) Updating the Station Cluster Map with Happiness Data Locations
+
+This refined map overlays Happiness data across various locations, noting that some areas are labeled `NA` due to unspecified `areaC` Circles, whose sizes represent `sample_size`, visualize the data points. Weather stations stand out in black for clarity.
+
+The color gradient from red to blue illustrates happiness levels: red for lower happiness and blue for higher.
+
+```{r Updating the Station Cluster Map with Happiness Data Locations, warning=FALSE}
+scale_radius <- function(size) { #This is a function to scale the sample_size
+  scaled_size <- (size)^(1/4) # 4 root scaling
+  return(scaled_size)
+}
+
+Happiness_www_grouped <- Happiness_www %>%
+  group_by(longitude, latitude, areaC) %>%
+  reframe(across(everything(), mean, na.rm = TRUE)) %>%
+  ungroup() # Group by longitude and latitude, then summarize by calculating the mean
+
+# Find the range of your mean_rating
+rating_min <- min(Happiness_www_grouped$mean_rating, na.rm = TRUE)
+rating_max <- max(Happiness_www_grouped$mean_rating, na.rm = TRUE)
+
+# Create a function to map mean_rating to colors
+# Adjusting the scale to spread colors more across the entire range
+customPalette <- colorNumeric(palette = c("darkred","white", "blue", "darkblue"), domain = c(rating_min, rating_max))
+
+leaflet_map <- leaflet() %>%
+  addTiles() %>%
+  # Add Happiness_wscore markers with color varying by mean_rating
+  addCircleMarkers(
+    data = Happiness_www_grouped,
+    ~longitude, 
+    ~latitude, 
+    popup = ~paste(
+                   "<b>", areaC, "</b><br>",
+                   "Sample Size: ", sample_size, "<br>",
+                   "Mean Score: ", mean_rating, "<br>",
+                   "Min Temp: ", sprintf("%.2f",weighted_t_min), "°C<br>",
+                   "Max Temp: ", sprintf("%.2f",weighted_t_max), "°C<br>",
+                   "Sunshine: ", sprintf("%.2f", weighted_sun), " hours<br>",
+                   "Rainfall: ", sprintf("%.2f", weighted_rain), " mm<br>",
+                   "Air Frost Days: ", sprintf("%.2f", weighted_af_inmth), " days<br>"),
+    color = ~customPalette(mean_rating),
+    opacity = 0, fillOpacity = 0.8, radius = ~scale_radius(sample_size)
+  ) %>%
+  # Add weather data markers
+  addCircleMarkers(
+    data = selected_data_wLocation,
+    ~longitude, ~latitude,
+    color = "black",
+    popup = ~paste(
+      "<b>", station, "</b><br>",
+      "Cluster: ", cluster, "<br>",
+      "Min Temp: ", sprintf("%.2f", t_min), "°C<br>",
+      "Max Temp: ", sprintf("%.2f", t_max), "°C<br>",
+      "Rain: ", sprintf("%.2f", rain), " mm<br>",
+      "Sun: ", sprintf("%.2f", sun), " hours<br>",
+      "Air Frost Days: ", sprintf("%.2f", af_inmth), " days<br>",
+      "Longitude: ", longitude, "<br>",
+      "Latitude: ", latitude
+    ),
+    opacity = 1, fillOpacity = 1, radius = 1
+  ) %>%
+  addProviderTiles(providers$Stamen.TonerLite, options = providerTileOptions(opacity = 0.5)) %>%
+  setView(lng = mean(Happiness_www_grouped$longitude), 
+          lat = mean(Happiness_www_grouped$latitude), zoom = 6)
+
+leaflet_map
+```
+
+### (vi) Restructuring the Dataframe. (One Row for Each Location for Each Year)
+
+```{r Create a df that has one mean/cv/low/med/high/vhigh per location per year, error=FALSE, warning=FALSE, include=TRUE}
+# First pivot the table for happiness scores
+Happiness_cut_score <- Happiness_www %>% 
+  select(areaA, areaB, areaC,
+         mean_rating1112, mean_rating1213, mean_rating1314, mean_rating1415, starts_with("weighted_")) %>%
+  pivot_longer(cols = c(mean_rating1112, mean_rating1213, mean_rating1314, mean_rating1415), names_to = "year_rating", values_to = "mean_rating_year"
+) %>%
+  select(areaA, areaB, areaC, year_rating, mean_rating_year)
+
+#Secondly, pivot the table for happines score cvs  
+Happiness_cut_cv <- Happiness_www %>% 
+  select(areaA, areaB, areaC,
+         mean_cv1112, mean_cv1213, mean_cv1314, mean_cv1415,
+         starts_with("weighted_")) %>%
+  pivot_longer(cols = c(mean_cv1112, mean_cv1213, mean_cv1314, mean_cv1415), names_to = "year_cv", values_to = "mean_cv_year") %>%
+  select(areaA, areaB, areaC, year_cv, mean_cv_year)
+
+# Pivot the table for low happiness score as a proportion
+Happiness_cut_low <- Happiness_www %>% 
+  select(areaA, areaB, areaC,
+         low_perc1112, low_perc1213, low_perc1314, low_perc1415,
+         starts_with("weighted_")) %>%
+  pivot_longer(cols = c(low_perc1112, low_perc1213, low_perc1314, low_perc1415), names_to = "year_low", values_to = "low_perc_year") %>%
+  select(areaA, areaB, areaC, year_low, low_perc_year)
+
+# Pivot the table for medium happiness score as a proportion
+Happiness_cut_med <- Happiness_www %>% 
+  select(areaA, areaB, areaC,
+         med_perc1112, med_perc1213, med_perc1314, med_perc1415,
+         starts_with("weighted_")) %>%
+  pivot_longer(cols = c(med_perc1112, med_perc1213, med_perc1314, med_perc1415), names_to = "year_med", values_to = "med_perc_year") %>%
+  select(areaA, areaB, areaC, year_med, med_perc_year)
+
+# Pivot the table for high happiness score as a proportion
+Happiness_cut_high <- Happiness_www %>% 
+  select(areaA, areaB, areaC,
+         high_perc1112, high_perc1213, high_perc1314, high_perc1415,
+         starts_with("weighted_")) %>%
+  pivot_longer(cols = c(high_perc1112, high_perc1213, high_perc1314, high_perc1415), names_to = "year_high", values_to = "high_perc_year") %>%
+  select(areaA, areaB, areaC, year_high, high_perc_year)
+
+# Pivot the table for very high happiness score as a proportion
+Happiness_cut_vhigh <- Happiness_www %>% 
+  select(areaA, areaB, areaC,
+         v_high_perc1112, v_high_perc1213, v_high_perc1314, v_high_perc1415,
+         starts_with("weighted_")) %>%
+  pivot_longer(cols = c(v_high_perc1112, v_high_perc1213, v_high_perc1314, v_high_perc1415), names_to = "year_vhigh", values_to = "v_high_perc_year") %>%
+  select(areaA, areaB, areaC, year_vhigh, v_high_perc_year)
+
+#Finally, put it all together
+Happiness_cut_pre <- suppressWarnings(left_join(Happiness_cut_score, Happiness_cut_cv, by = c("areaA", "areaB", "areaC")))
+Happiness_cut_pre <- suppressWarnings(left_join(Happiness_cut_pre, Happiness_cut_low, by = c("areaA", "areaB", "areaC")))
+Happiness_cut_pre <- suppressWarnings(left_join(Happiness_cut_pre, Happiness_cut_med, by = c("areaA", "areaB", "areaC")))
+Happiness_cut_pre <- suppressWarnings(left_join(Happiness_cut_pre, Happiness_cut_high, by = c("areaA", "areaB", "areaC")))
+Happiness_cut_pre <- suppressWarnings(left_join(Happiness_cut_pre, Happiness_cut_vhigh, by = c("areaA", "areaB", "areaC"))) %>%
+  filter(
+    str_sub(year_cv, -4, -1) == str_sub(year_rating, -4, -1) &
+    str_sub(year_cv, -4, -1) == str_sub(year_low, -4, -1) &
+    str_sub(year_cv, -4, -1) == str_sub(year_med, -4, -1) &
+    str_sub(year_cv, -4, -1) == str_sub(year_high, -4, -1) &
+    str_sub(year_cv, -4, -1) == str_sub(year_vhigh, -4, -1)
+  ) %>% # This filtering process gets rid of all the duplicate rows
+  mutate(year = str_sub(year_cv, -4, -1)) %>%
+  select(-year_cv, -year_rating, -year_low, -year_med, -year_high, -year_vhigh)
+
+Happiness_cut <- suppressWarnings(left_join(Happiness_www, Happiness_cut_pre, by = c("areaA", "areaB", "areaC")))
+```
+
+```{r}
+# Pivot Longed dataframe which makes it easy to run scatter plots
+Happiness_cut %>% select(areaC,year, mean_rating_year, mean_cv_year, low_perc_year, med_perc_year, high_perc_year, v_high_perc_year, starts_with("weighted_")) %>% drop_na(areaC) %>% reactable(defaultPageSize = 8)
+```
+
+### (vii) Creating a "Good Weather Score" and Generating Scatter Plots with Regression Lines to Investigate Relationships
+
+```{r}
+Happiness_wscore <- Happiness_cut %>%
+  # Normalize variables
+  mutate(
+    normalized_t_min = (weighted_t_min - min(weighted_t_min)) / (max(weighted_t_min) - min(weighted_t_min)),
+    normalized_t_max = (weighted_t_max - min(weighted_t_max)) / (max(weighted_t_max) - min(weighted_t_max)),
+    normalized_sun = (weighted_sun - min(weighted_sun)) / (max(weighted_sun) - min(weighted_sun)),
+    inv_normalized_rain = 1 - ((weighted_rain - min(weighted_rain)) / (max(weighted_rain) - min(weighted_rain))),  # Inverted
+    inv_normalized_af_inmth = 1 - ((weighted_af_inmth - min(weighted_af_inmth)) / (max(weighted_af_inmth) - min(weighted_af_inmth)))  # Inverted
+  ) %>%
+  # Calculate the "good weather" score (feel free to adjust the weights as desired)
+  mutate(
+    good_weather_score = normalized_t_min * 0.2 + # 20% t_min
+      normalized_t_max * 0.2 + # 20% t_max
+      normalized_sun * 0.3 + # 30% sunshine
+      inv_normalized_rain * 0.2 + # 20% rainfall
+      inv_normalized_af_inmth * 0.1 # 10% airfrost
+  )
+```
+
+The `good_weather_score` is and arbitarrily determined score which is comprised of 20% minimum temperature, 20% maximum temperature, 30% sunshine, 20% inversed rainfall and 10% air frost days in the month.
+
+::: panel-tabset
+#### "Good Weather Score"
+
+```{r Happiness Score vs Good Weather Score, warning=FALSE}
+# CLICK THE OTHER TABS TO SEE THE PLOTS FOR EACH OF THE WEATHER VARIABLES.
+# Scatter plot and regression line of mean rating against calculated t_min.
+# Spearman method is used as it is less suseptable to leveraged points.
+ggscatter(Happiness_wscore, x = "mean_rating_year", y = "good_weather_score",
+          size = 0.3, color = "year", palette = "jco",
+          add = "reg.line", conf.int = TRUE) +
+  stat_cor(aes(color = year), method = "spearman", label.x = 5.5)
+```
+
+This plot shows that there is no correlation between the "good weather score" and Happiness ratings for each year.
+
+#### `min_t`
+
+```{r Scatter of rating against minimum temperature, warning=FALSE}
+ggscatter(Happiness_wscore, x = "mean_rating_year", y = "weighted_t_min", size = 0.3, color = "year", palette = "jco",
+          add = "reg.line", conf.int = TRUE) +
+  stat_cor(aes(color = year), method = "spearman", label.x = 5.5)
+```
+
+This plot shows that there is no correlation between minimum temperature and Happiness rating for all years.
+
+#### `max_t`
+
+```{r Scatter of rating against maximum temperature, warning=FALSE}
+ggscatter(Happiness_wscore, x = "mean_rating_year", y = "weighted_t_max", size = 0.3, color = "year", palette = "jco",
+          add = "reg.line", conf.int = TRUE) +
+  stat_cor(aes(color = year), method = "spearman", label.x = 5.5)
+```
+
+This plot shows that there is no correlation between maximum temperature and Happiness rating for all years.
+
+#### `sun`
+
+```{r Scatter of rating against sunshine, warning=FALSE}
+ggscatter(Happiness_wscore, x = "mean_rating_year", y = "weighted_sun", size = 0.3, color = "year", palette = "jco",
+          add = "reg.line", conf.int = TRUE) +
+  stat_cor(aes(color = year), method = "spearman", label.x = 5.5)
+```
+
+This plot shows that there is no correlation between sunshine and Happiness ratings for all years.
+
+#### `rain`
+
+```{r Scatter of rating against rainfall, warning=FALSE}
+ggscatter(Happiness_wscore, x = "mean_rating_year", y = "weighted_rain", size = 0.3, color = "year", palette = "jco",
+          add = "reg.line", conf.int = TRUE) +
+  stat_cor(aes(color = year), method = "spearman", label.x = 5.5)
+```
+
+This plot shows that there is no correlation between rainfall and Happiness rating for all years.
+
+#### `af_inmth`
+
+```{r Scatter of rating against air frost days, warning=FALSE}
+ggscatter(Happiness_wscore, x = "mean_rating_year", y = "weighted_af_inmth", size = 0.3, color = "year", palette = "jco",
+          add = "reg.line", conf.int = TRUE) +
+  stat_cor(aes(color = year), method = "spearman", label.x = 5.5)
+```
+
+This plot shows that there is no correlation between air frost days in a month and Happiness rating for all years.
+:::
+
+Upon examining these plots, it appears that the weather variables may not significantly impact happiness. However, a more nuanced analysis is necessary to draw a conclusive inference. It is plausible that the effects of the weather variables are subtle and may not be adequately captured through simple correlation analysis. Further investigation is required to ascertain the true extent of their influence on happiness.
+
+### (viii) Which Weather Variables Contributes the Greatest Impact to Happiness Score? - A Multivariate Analysis
+
+Here I create a multivariate generalised linear regression model, including all the weather data variables into the model to see which variable affects happiness ratings the most. I first begin by normalising the variables so the estimates can be directly compared.
+
+```{r}
+# Standardizing the variables using Z-score standardization
+Happiness_wscore_normalized <- Happiness_wscore %>%
+  mutate(across(c(weighted_t_max, weighted_t_min, weighted_sun, weighted_rain, weighted_af_inmth, longitude, latitude),
+                ~scale(.) %>% as.vector))
+```
+
+This model only includes the normalised weighted weather variables.
+
+```{r Basic GLM model with weather variables predicting mean_rating}
+# GLM using normalized variables without location
+rating_weather <- glm(mean_rating ~ weighted_t_max + weighted_t_min + weighted_sun + weighted_rain + weighted_af_inmth,
+                      data = Happiness_wscore_normalized)
+
+# Displaying Model Summary
+summary(rating_weather)
+```
+
+This model includes the normalised weighted weather variables and the survey coordinates.
+
+```{r Basic GLM model with weather and location variables predicting mean_rating}
+# GLM using normalized variables with location
+rating_weather_location <- glm(
+  mean_rating ~ weighted_t_max + weighted_t_min + weighted_sun + weighted_rain + weighted_af_inmth + longitude + latitude,
+  data = Happiness_wscore_normalized
+)
+
+summary(rating_weather_location)
+```
+
+### (ix) Conclusion
+
+The warmer days (`t_max`) will have a positive association with a tendency to remain happy, since generally, people like warmth. On the other hand, the most potent negative effect of lower minimum temperatures (`t_min`) points out a marked aversion to cold among the UK population, and hence, the happiness score would rather be more influenced by feeling discomfort from the lower temperatures than by pleasure from warm temperatures.
+
+Research has already proven sunlight's benefits. It is beneficial for the mood because of its essential role in vitamin D synthesis and regulation of circadian rhythm. The fact that it became a statistically significant variable only after location was inserted into the model indicates that people living in different locations throughout the UK; value sunshine differently as a contributing factor to their overall happiness.
+
+There would be a weakening influence of rain on happiness, factoring the geographical diversity of the UK, and thus it would be a very high location influence—possibly looked upon less favorably in urban areas, while it would be valued in rural or agricultural areas. This may be what caused the overall balancing out, making it seem like rainfall does not influence happiness amongst the populous of the UK (when location is taken into account).
+
+A negative relationship with longitude exposes an interesting east-west gradient in happiness across the UK, which might reflect changes in climatic, socio-economic, or cultural attitudes towards weather. This would, therefore, indicate that despite the comparison of such a relatively small area like the UK, regional differences still do matter in affecting the experience of weather conditions on happiness.
+
+The absence of any significant latitude effect is extremely interesting. This means that the north-south positioning does not influence the mood across the UK. It is intriguing to note that it is the longitude, or the east-west postitioning of the populous which plays a significant influence on happiness. This signal remains, even after correcting for all included weather variables. This, therefore, means that policies and interventions in well-being must be set according to the different conditions and taste of the UK regions and, therefore, should not be generic.
+
+While it is clear that the models provide strong contributions toward the understanding of UK happiness, the unexplained variance evidently points toward other factors, such as individual characteristics, indoor environments, and seasonal patterns. This highlights potential areas for further research to fully understand the drivers of well-being within the UK.
+
+The complex relationships of well-being with the weather of the UK, having a very clear preference for warm and sunny conditions in most contexts, are considered. The nuanced impact of these preferences, however, is further modulated by geographical location, more specifically the differences longitudinally, which underline deep local cultural and environmental determinants of the experience of weather within the UK population.
+
+## Part 4(b) : Automate the Analysis Workflow
+
+*Try to automate parts 1 to 3 as much as possible. Write scripts and/or programs that follow each of the steps you did to find your answers to parts 1 to 3. Try to parameterise the scripts so that the whole process could be easily re-run with a small difference, say, by dividing the UK into four equal regions instead of three.*
+
+*Submit your programs/scripts in a zip file (or similar) and include in your report a brief description of how they can be run and what they do.*
+
+**I trust that this entire document sufficiently answers this part in full. It contains all the scripts used and is explained thoroughly in the main text as well as with in-line comments of the Quarto file.**
+
+```{=html}
+<a href="https://prospectivepaycalc.s3.eu-west-2.amazonaws.com/Assignment3Files.zip" download="Assignment3_ProjectFiles.zip">
+  <button>Download All Project Files</button>
+</a>
+```
