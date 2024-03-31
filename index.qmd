@@ -979,7 +979,7 @@ rf_rs # results of the split for each cross-validation set
 
 ### (iv) Evaluating the Trained RandomForest Model (with the training data).
 
-This section assesses the model's accuracy in predicting the stations involved in the training phase.
+This section assesses the model's accuracy in predicting the stations involved in the training phase. The model predicts each line in a line by line basis. Using `dplyr`, I reframe the dataframe to show the "per station" average predictions for simplicity.
 
 It reveals that the model misclassified only two stations, indicating a high level of predictive accuracy for the training dataset.
 
@@ -1008,7 +1008,7 @@ region_pred_summary <- region_pred %>% # Generating a Summary table for all the 
   relocate(prediction, .before = region) %>% 
   mutate(correct = region == prediction) %>% # Correct will be true if prediction == region
   relocate(correct, .before = .pred_South) %>%
-  arrange(correct) %>% #Makes sure wrong predictions get brought to the top
+  arrange(correct) %>% # Makes sure wrong predictions get brought to the top
   mutate(prediction = factor(prediction, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")),
          region = factor(region, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")))
 
