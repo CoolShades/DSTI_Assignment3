@@ -1624,7 +1624,7 @@ Happiness_wscore <- Happiness_cut %>%
   )
 ```
 
-The `good_weather_score` is and arbitarrily determined score which is comprised of 20% minimum temperature, 20% maximum temperature, 30% sunshine, 20% inversed rainfall and 10% air frost days in the month.
+The `good_weather_score` is and arbitrarily determined score which is comprised of 20% minimum temperature, 20% maximum temperature, 30% sunshine, 20% inversed rainfall and 10% inversed air frost days in the month.
 
 ::: panel-tabset
 #### "Good Weather Score"
@@ -1698,7 +1698,7 @@ Upon examining these plots, it appears that the weather variables may not signif
 
 Here I create a multivariate generalised linear regression model, including all the weather data variables into the model to see which variable affects happiness ratings the most. I first begin by normalising the variables so the estimates can be directly compared.
 
-```{r}
+```{r Normalising variables prior to running a GLM model}
 # Standardizing the variables using Z-score standardization
 Happiness_wscore_normalized <- Happiness_wscore %>%
   mutate(across(c(weighted_t_max, weighted_t_min, weighted_sun, weighted_rain, weighted_af_inmth, longitude, latitude),
