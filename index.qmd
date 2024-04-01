@@ -2,6 +2,7 @@
 title: "Real World Analysis of Weather & Happiness Data"
 author: "Dr U Bhalraam MBChB, BMSc(Hons.), MRCP(Edin.)"
 subtitle: "School of Informatics, University of Edinburgh"
+date: "04/01/2024"
 format:
   html:
     smooth-scroll: true
@@ -11,6 +12,8 @@ editor: "visual"
 execute: 
   cache: true
 ---
+
+*Access the Live Site:* [https://coolshades.github.io/DSTI_Assignment3/](#0)
 
 ## Part 0 : Data Cleaning and Preparation
 
