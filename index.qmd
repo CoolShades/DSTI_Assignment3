@@ -1,6 +1,6 @@
 ---
 title: "Real World Analysis of Weather & Happiness Data"
-author: "Dr U Bhalraam MBChB, BMSc(Hons.), MRCP(Edin.)"
+author: "Exam Number : B245702"
 subtitle: "School of Informatics, University of Edinburgh"
 date: "04/01/2024"
 format:
@@ -13,17 +13,22 @@ execute:
   cache: true
 ---
 
-*Access the Live Site:* [https://coolshades.github.io/DSTI_Assignment3/](#0)
-
 ## Part 0 : Data Cleaning and Preparation
 
 ### (i) Downloading the Data using the provided `stations.txt`
 
-The python chunk described here is used to download all the weather data required for this task. It imports the provided `stations.txt` file. It then iterates through all the lines to download all the files by inserting the station name into the URL.
+The *python* chunk described here is used to download all the weather data required for this task. It imports the provided `stations.txt` file. It then iterates through all the lines to download all the files by inserting the station name into the URL.
 
 Each downloaded file is then stored in the path set in the variable `folder_name`.
 
-*Be sure to set the `folder_name` variable to a path accessible by your local machine.*
+> *If you are re-running this Quarto file in RStudio, be sure to:*
+>
+> -   *set the `folder_name` variable to a path accessible by your local machine.*
+>
+> -   *ensure your `conda` environment has the following libraries installed with `pip`: \
+>     *\[*`os`, `requests`, `pandas`, `re`, `warnings`*\]
+>
+> -   *set the `conda` environment that has the required libraries in the `.Rprofile` file.*
 
 ```{python Downloader of MetOffice data from stations.txt}
 # Make sure your reticulate package has these libraries installed in the PYENV.
@@ -31,7 +36,7 @@ Each downloaded file is then stored in the path set in the variable `folder_name
 import os
 import requests
 
-# SPECIFY THE FOLDER YOU WANT YOUR WEATHER FILES TO BE SAVED!!
+# SPECIFY THE FOLDER YOU WANT THE WEATHER FILES TO BE SAVED!!
 folder_name = '/home/rstudio/Encrypted-Data/R/R Projects/DSTI_Assignment3/weather_data'
 os.makedirs(folder_name, exist_ok=True) #creates folder if not created yet.
 
@@ -52,7 +57,7 @@ def download_file(station_name):
         with open(save_path, 'wb') as file:
             file.write(response.content)
         print(f'Successfully downloaded: {station_name}')
-    # My error handling section as I needed to debug this code.
+    # Error Handling
     except requests.HTTPError as e:
         print(f'Failed to download {url}. HTTPError: {e}')
     except requests.RequestException as e:
@@ -60,7 +65,7 @@ def download_file(station_name):
 
 # Open the text file and read lines
 # The file is split by lines, so that this can be fed into the function above.
-with open('stations.txt', 'r') as file:
+with open('data/stations.txt', 'r') as file:
     station_names = file.read().splitlines()
 
 # Download files for each station
@@ -83,14 +88,15 @@ The python script described here extracts and preserves most of the information 
 
 The table is then extracted and processed line by line to create a `pandas` dataframe.
 
-The `.split()` method was used to seperate the table into its components.
+The `.split()` method was used to separate the table into its components.
 
 If the script finds fewer than seven parts, it adds `---` at the end of the line to keep things moving. This method isn't perfect since it only fixes missing info in the `sun` column, not in any other spots. But, after looking over the data, it seems this problem mostly pops up in the `sun` column anyway, so this fix does the job well enough for now.
 
-All denoted `*` for each of the columns are preserved and noted in a Boolean variable.\
+All denoted `*` for each of the columns are preserved and noted in a Boolean variable.
+
 The `sun_sensor` used to log the sunshine data is also preserved as the script looks for `*` or `#` suffixes to `sun`.
 
-If a line has the word `Provisional` in it, another boolean is set for that line.
+If a line has the word `Provisional` in it, another Boolean is set for that line.
 
 When the station's dataframe is being concatenated, the appropriate `easting` and `northing` values are appended depending on the `year` and `month` of a particular location line.
 
@@ -102,7 +108,7 @@ import os
 import re
 import warnings
 
-# Filter out future warnings. This clutters the output section.
+# Filter out future warnings as this clutters the output.
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 def read_and_process_file(file_path):
@@ -138,12 +144,12 @@ def month_to_number(month_str):
   
   
 # This is the most complicated function which looks for the following:
-# (MON)YYYY to (MON)YYYY
-# (MON)YYYY - (MON)YYYY
-# (MON)YYYY onwards
-# from (MON)YYYY
-# after (MON)YYYY
-# before (MON)YYYY
+# (MTH)YYYY to (MTH)YYYY
+# (MTH)YYYY - (MTH)YYYY
+# (MTH)YYYY onwards
+# from (MTH)YYYY
+# after (MTH)YYYY
+# before (MTH)YYYY
 # This function is necessary as some stations have changed location.
 
 def parse_location_info(line):
@@ -370,7 +376,7 @@ Here we use the `sp` and `sf` packages to convert the `easting` and `northing` v
 
 The final `weather` dataframe is created. An interactive `reactable` table is displayed after the code chunk for the user to be able to browse through the data of the 37 stations.
 
-I have implemented a quick filter function for the `station`, `year`, and `month` column using javascript so the user can quickly find the data required.
+In the table, I have implemented a quick filter function for the `station`, `year`, and `month` column using javascript so the user can quickly find the data required.
 
 ```{r Import combined file into R and calculate co-ordinates}
 suppressPackageStartupMessages(library(tidyverse)) 
@@ -449,7 +455,7 @@ weather <- S_weather %>%
   )
 
 set.seed(123)
-# Review a table that has 3 random weather lines per weather station. (37*3 = 111)
+# Review the full extracted weather_data in a dataframe.
 # You can see that different lon/lat is attributed to Lowestoft depending on the year. (venue changed from 09/2007)
 
 # This is an interactive filterable table which you can use to find the station/year/month you desire.
@@ -623,9 +629,9 @@ leaflet_map
 
 ## Part 1 : Clustering by Weather Data
 
-*Look at the weather data for each of the weather stations.*
-
-*Looking only at the weather data (that is, don't include the latitude/longitude of the weather station) can you use a clustering algorithm to see if these stations can be clustered into groups that have "similar" weather? Note that you will have multiple weather readings for each station. You could pick the most recent, an average, an extreme, or you could consider all the points individually and look for clusters in the individual observations. You should try to justify your choice.*
+> *Look at the weather data for each of the weather stations.*
+>
+> *Looking only at the weather data (that is, don't include the latitude/longitude of the weather station) can you use a clustering algorithm to see if these stations can be clustered into groups that have "similar" weather? Note that you will have multiple weather readings for each station. You could pick the most recent, an average, an extreme, or you could consider all the points individually and look for clusters in the individual observations. You should try to justify your choice.*
 
 I have decided to analyse data averaged across the operational lifespan of each station, clustering the stations based on key weather parameters: minimum temperature (`t_min`), maximum temperature (`t_max`), rainfall (`rain`), sunshine duration (`sun`), and air frost days (`af_inmth`). The k-means clustering algorithm will facilitate this process. To determine the most effective number of clusters, I will employ the elbow-plot method. This approach seeks an optimal balance between the number of clusters and the within-cluster sum of squares, aiming to minimise variance within clusters without over-fitting.
 
@@ -742,41 +748,41 @@ og_cluster_map
 
 In order to quantify the characteristics of each cluster, here is the tabular breakdown of where the cluster centers lie with regards to `t_min`, `t_max`, `rain`, `sun` and `af_inmth`.
 
-#### **Cluster 1 (`Blue`)**
+> #### **Cluster 1 (`Blue`)** 
+>
+> -   *Geographical Spread*: Predominantly covering Scotland and parts of Northern England.
+>
+> -   *Temperature*: Exhibits cooler temperatures, with lower minimum (**`t_min`**) and maximum (**`t_max`**) temperature values.
+>
+> -   *Rainfall*: Moderate amounts of rainfall, slightly higher than the southern cluster but less than the forested areas.
+>
+> -   *Sunshine*: The least amount of sunshine compared to the other clusters, which is consistent with regions that are farther north.
+>
+> -   *Air Frost*: Occurrences of air frost (**`af_inmth`**) are relatively infrequent but not as rare as in the southern cluster.
 
--   *Geographical Spread*: Predominantly covering Scotland and parts of Northern England.
+> #### **Cluster 2 (`Brown`)**
+>
+> -   *Geographical Spread*: Mainly located in the south of the UK, including London and surrounding areas.
+>
+> -   Temperature: Warmer temperatures with the highest **`t_min`** and **`t_max`** values, which is characteristic of the more temperate southern regions.
+>
+> -   *Rainfall*: This cluster experiences the least rainfall, indicating drier conditions.
+>
+> -   *Sunshine*: Receives the most sunshine, aligning with southern areas typically enjoying more sunny days.
+>
+> -   *Air Frost*: The occurrence of air frost is the least within this cluster, fitting the pattern of milder winters in the south.
 
--   *Temperature*: Exhibits cooler temperatures, with lower minimum (**`t_min`**) and maximum (**`t_max`**) temperature values.
-
--   *Rainfall*: Moderate amounts of rainfall, slightly higher than the southern cluster but less than the forested areas.
-
--   *Sunshine*: The least amount of sunshine compared to the other clusters, which is consistent with regions that are farther north.
-
--   *Air Frost*: Occurrences of air frost (**`af_inmth`**) are relatively infrequent but not as rare as in the southern cluster.
-
-#### **Cluster 2 (`Brown`)**
-
--   *Geographical Spread*: Mainly located in the south of the UK, including London and surrounding areas.
-
--   Temperature: Warmer temperatures with the highest **`t_min`** and **`t_max`** values, which is characteristic of the more temperate southern regions.
-
--   *Rainfall*: This cluster experiences the least rainfall, indicating drier conditions.
-
--   *Sunshine*: Receives the most sunshine, aligning with southern areas typically enjoying more sunny days.
-
--   *Air Frost*: The occurrence of air frost is the least within this cluster, fitting the pattern of milder winters in the south.
-
-#### **Cluster 3 (`Green`)**
-
--   *Geographical Spread*: Scattered, but likely represents weather stations in forested regions, possibly in areas of variable elevation.
-
--   *Temperature*: This cluster has the most significant deviation in both minimum and maximum temperatures, suggesting a wide range of conditions, possibly due to varied terrain and canopy cover in forests.
-
--   *Rainfall*: Substantially higher rainfall, the highest among the clusters, which is typical for forested and potentially upland areas.
-
--   *Sunshine*: Less sunshine, which could be due to factors such as increased cloud cover and shading from trees.
-
--   *Air Frost*: A very high frequency of air frost incidents, indicating that these stations might be in areas prone to colder conditions, especially at night or during certain months.
+> #### **Cluster 3 (`Green`)**
+>
+> -   *Geographical Spread*: Scattered, but likely represents weather stations in forested regions, possibly in areas of variable elevation.
+>
+> -   *Temperature*: This cluster has the most significant deviation in both minimum and maximum temperatures, suggesting a wide range of conditions, possibly due to varied terrain and canopy cover in forests.
+>
+> -   *Rainfall*: Substantially higher rainfall, the highest among the clusters, which is typical for forested and potentially upland areas.
+>
+> -   *Sunshine*: Less sunshine, which could be due to factors such as increased cloud cover and shading from trees.
+>
+> -   *Air Frost*: A very high frequency of air frost incidents, indicating that these stations might be in areas prone to colder conditions, especially at night or during certain months.
 
 `Cluster 1` represents the cooler, moderately wet, and less sunny conditions typical of the north.\
 `Cluster 2` showcases the milder, drier, and sunnier climate of the southern UK.\
@@ -789,18 +795,18 @@ cluster_centers
 
 ## Part 2 : Multi-Class Classification Problem (Predicting North, Middle South from Weather Data)
 
-*You should exclude 5 of the weather stations from this set.\
-(You could do this by picking the last 5 stations alphabetically).*
-
-*Can you predict whether they fall in the Northern third of the UK, Central third of the UK or the Southern third of the UK using only the weather data? You have latitude data for all the weather stations, so that can give you the classification for each of the weather stations in your training set. To determine the latitude of the lines dividing the UK into three, you should note that the most northerly point has a latitude of 60.9 and the most southerly point has a latitude of 49.9.*
+> *You should exclude 5 of the weather stations from this set.\
+> (You could do this by picking the last 5 stations alphabetically).*
+>
+> *Can you predict whether they fall in the Northern third of the UK, Central third of the UK or the Southern third of the UK using only the weather data? You have latitude data for all the weather stations, so that can give you the classification for each of the weather stations in your training set. To determine the latitude of the lines dividing the UK into three, you should note that the most northerly point has a latitude of 60.9 and the most southerly point has a latitude of 49.9.*
 
 ### (i) Updating the Cluster Map to show the latitude split lines: (North/Middle/South)
 
 It's crucial to note how the clusters align with the divisional latitude lines of North, Middle, and South. We enhance the cluster map by incorporating these lines for a clearer geographical context.
 
-To streamline the process, we've optimized for automation; modifying the **`number_of_equal_regions`** variable allows for easy adjustment of the divisional criteria.
+To streamline the process, I've optimised for automation; modifying the **`number_of_equal_regions`** variable allows for easy adjustment of the divisional criteria.
 
-The resultant map reveals a machine learning model's potential proficiency in distinguishing between `Southern` and `Northern` stations, yet indicates a possible challenge in differentiating Middle region stations from those in adjacent areas. This insight underscores the nuanced ability of the model to interpret geographical nuances based on meteorological data.
+The resultant map reveals a machine learning model's potential proficiency in distinguishing between `Southern` and `Northern` stations, yet indicates a possible challenge in differentiating `Middle` region stations from those in adjacent areas. This insight underscores the nuanced ability of the model to interpret geographical nuances based on only meteorological data.
 
 ```{r Show a Map of the number of regions that the UK will be split up into.}
                   ##SET THE NUMBER OF EQUAL REGIONS REQUIRED HERE##
@@ -849,9 +855,9 @@ cluster_map
 
 ### (ii) Finalising the Dataframe; and Splitting the Dataset into the Training and Testing set.
 
-We start by finalizing the dataframe that will serve as the foundation for training our model. Recognising that a single data point per station would insufficiently support the development of a statistically robust model, I have opted to include one record for each station per year instead. However, in alignment with the assignment's guidelines, the year variable will not be incorporated into the training process, focusing solely on weather data as predictors.
+We start by finalising the dataframe that will serve as the foundation for training our model. Recognising that a single data point per station would insufficiently support the development of a statistically robust model, I have opted to include one record for each station per year instead. However, in alignment with the assignment's guidelines, the year variable will not be incorporated into the training process, focusing solely on weather data as predictors.
 
-Following the assignment's recommendation, the last five stations, when sorted alphabetically, will be set aside for model validation. The data designated for training will be stored in the **`region_train`** dataframe, while the data for the stations allocated for testing will be maintained in the **`region_test`** dataframe. This approach ensures a clear separation between training and testing datasets, facilitating a more accurate assessment of the model's predictive capabilities.
+Following the assignment's recommendation, the last five stations, *when sorted alphabetically*, will be set aside for model validation. The data designated for training will be stored in the **`region_train`** dataframe, while the data for the stations allocated for testing will be maintained in the **`region_test`** dataframe. This approach ensures a clear separation between training and testing datasets, facilitating a more accurate assessment of the model's predictive capabilities.
 
 ```{r Preparing DataFrame for Model Training}
 suppressPackageStartupMessages(library(tidymodels)) 
@@ -896,7 +902,7 @@ region_test <- weather_stations_prep %>%
 
 ### (iii) Using the `TidyModels` Library to streamline the Model Training Process.
 
-I will be utilising the `tidymodels` package to make this model training process as streamlined as possible. Typically, the `rsample::initial_split` function is used to proportionately create training and testing sets. However, as we are specifing custom, pre-determined groups for the training and testing sets, the `rsample::make_splits` function is used instead:
+I will be utilising the `tidymodels` package to make this model training process as streamlined as possible. Typically, the `rsample::initial_split` function is used to proportionately create training and testing sets. However, as we are specifying custom, pre-determined groups for the training and testing sets, the `rsample::make_splits` function is used instead:
 
 ```{r Using rsample::make_splits() to apply this custom train/test split}
 # This is the way to create an rsplit object with custom train/test splits
@@ -1135,9 +1141,9 @@ conf_mat(region_final_pred_summary, truth = region, estimate = prediction)
 
 ## Part 3 : Real World Happiness Data from ONS
 
-*The Office for National Statistics collects and publishes data on how happy people think they are. This is self-reported data, so it may well have some inherent biases, but it is good enough for us to draw some general conclusions. Happiness is measured on a scale of 0-10. Let's try to answer the question as to whether the weather affects how happy we are.*
-
-*Try to join the weather station data with the happiness data. You will only be able to do this in a coarse-grained way, because the places where there are weather stations do not correspond directly to the census areas used in the happiness surveys. You could use bands of latitude to do this, or you could put a grid over the country and look at which grid cell a weather station or census region falls in. Don't worry too much about the fact that weather data and census data don't cover exactly the same time periods; for the purposes of this assessment, we can assume that to a first approximation the general climate at a given weather station is fairly constant over time and that happiness also does not change too much from year to year.*
+> *The Office for National Statistics collects and publishes data on how happy people think they are. This is self-reported data, so it may well have some inherent biases, but it is good enough for us to draw some general conclusions. Happiness is measured on a scale of 0-10. Let's try to answer the question as to whether the weather affects how happy we are.*
+>
+> *Try to join the weather station data with the happiness data. You will only be able to do this in a coarse-grained way, because the places where there are weather stations do not correspond directly to the census areas used in the happiness surveys. You could use bands of latitude to do this, or you could put a grid over the country and look at which grid cell a weather station or census region falls in. Don't worry too much about the fact that weather data and census data don't cover exactly the same time periods; for the purposes of this assessment, we can assume that to a first approximation the general climate at a given weather station is fairly constant over time and that happiness also does not change too much from year to year.*
 
 ### (i) Importing Happiness Data from ONS into R
 
@@ -1224,6 +1230,8 @@ S_Happiness1112 <- S_Happiness1112 %>%
 ### (ii) Use the Nominatim API to query longitude/latitude for each region in the 2014/15 sheet.
 
 Due to request limits from Nominatim, this section of code should take at least 7 minutes to execute.
+
+I recognise that the Happiness data from other years have more locations, but I have resigned to simply use the latest (14/15) dataset as a source of locations for simplicity.
 
 ```{r Importing Longitude Latitude Data for all areaB and areaC (tidygeocoder)}
 library(tidygeocoder)
@@ -1436,8 +1444,6 @@ This code segment performs a comparison, calculating the percentage differences 
 
 The objective is to verify that the weather data aligns closely with the true values.
 
-The observation that most values fall within a +/- 0.0001% range suggests the employed method is highly effective in approximating the actual weather conditions, thereby validating the approach's accuracy and reliability.
-
 ```{r Verification of Weighted Weather Values for Eastbourne}
 # These are the real values for Eastbourne
 weather_data <- weather_byStation %>% filter(station == "Eastbourne") %>%
@@ -1461,9 +1467,11 @@ percentage_differences_formatted <- sapply(percentage_differences, function(x) s
 print(percentage_differences_formatted)
 ```
 
+The observation that most values fall within a +/- 0.0001% range suggests the employed method is highly effective in approximating the actual weather conditions, thereby proving the approach's accuracy and reliability.
+
 ### (vi) Updating the Station Cluster Map with Happiness Data Locations
 
-This refined map overlays Happiness data across various locations, noting that some areas are labeled `NA` due to unspecified `areaC` Circles, whose sizes represent `sample_size`, visualize the data points. Weather stations stand out in black for clarity.
+This refined map overlays Happiness data across various locations, whose sizes represent `sample_size`, visualize the data points. Weather stations stand out in black for clarity.
 
 The color gradient from red to blue illustrates happiness levels: red for lower happiness and blue for higher.
 
@@ -1527,6 +1535,7 @@ leaflet_map <- leaflet() %>%
   setView(lng = mean(Happiness_www_grouped$longitude), 
           lat = mean(Happiness_www_grouped$latitude), zoom = 6)
 
+# Click on the circles to see the calculated weather data for each happiness survey location
 leaflet_map
 ```
 
@@ -1600,14 +1609,14 @@ Happiness_cut_pre <- suppressWarnings(left_join(Happiness_cut_pre, Happiness_cut
 Happiness_cut <- suppressWarnings(left_join(Happiness_www, Happiness_cut_pre, by = c("areaA", "areaB", "areaC")))
 ```
 
-```{r}
+```{r Presenting the final working dataframe}
 # Pivot Longed dataframe which makes it easy to run scatter plots
 Happiness_cut %>% select(areaC,year, mean_rating_year, mean_cv_year, low_perc_year, med_perc_year, high_perc_year, v_high_perc_year, starts_with("weighted_")) %>% drop_na(areaC) %>% reactable(defaultPageSize = 8)
 ```
 
 ### (vii) Creating a "Good Weather Score" and Generating Scatter Plots with Regression Lines to Investigate Relationships
 
-```{r}
+```{r Calculating a "Good Weather Score"}
 Happiness_wscore <- Happiness_cut %>%
   # Normalize variables
   mutate(
@@ -1749,9 +1758,9 @@ On the whole, this evidence suggests that weather does have a measurable impact 
 
 ## Part 4(b) : Automate the Analysis Workflow
 
-*Try to automate parts 1 to 3 as much as possible. Write scripts and/or programs that follow each of the steps you did to find your answers to parts 1 to 3. Try to parameterise the scripts so that the whole process could be easily re-run with a small difference, say, by dividing the UK into four equal regions instead of three.*
-
-*Submit your programs/scripts in a zip file (or similar) and include in your report a brief description of how they can be run and what they do.*
+> *Try to automate parts 1 to 3 as much as possible. Write scripts and/or programs that follow each of the steps you did to find your answers to parts 1 to 3. Try to parameterise the scripts so that the whole process could be easily re-run with a small difference, say, by dividing the UK into four equal regions instead of three.*
+>
+> *Submit your programs/scripts in a zip file (or similar) and include in your report a brief description of how they can be run and what they do.*
 
 **I trust that this entire document sufficiently answers this part in full. It contains all the scripts used and is explained thoroughly in the main text, as well as with in-line comments of the Quarto file.**
 
