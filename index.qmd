@@ -25,7 +25,7 @@ Each downloaded file is then stored in the path set in the variable `folder_name
 >
 > -   *set the `folder_name` variable to a path accessible by your local machine.*
 >
-> -   *ensure your `conda` environment has the following libraries installed with `pip`: \
+> -   *ensure your `conda` environment has the following libraries installed with `pip`:\
 >     *\[*`os`, `requests`, `pandas`, `re`, `warnings`*\]
 >
 > -   *set the `conda` environment that has the required libraries in the `.Rprofile` file.*
@@ -748,7 +748,7 @@ og_cluster_map
 
 In order to quantify the characteristics of each cluster, here is the tabular breakdown of where the cluster centers lie with regards to `t_min`, `t_max`, `rain`, `sun` and `af_inmth`.
 
-> #### **Cluster 1 (`Blue`)** 
+> #### **Cluster 1 (`Blue`)**
 >
 > -   *Geographical Spread*: Predominantly covering Scotland and parts of Northern England.
 >
@@ -813,6 +813,9 @@ The resultant map reveals a machine learning model's potential proficiency in di
                            number_of_equal_regions = 3 
                   ##SET THE NUMBER OF EQUAL REGIONS REQUIRED HERE##
 
+# Ensure number_of_equal_regions is within 2 to 9
+number_of_equal_regions <- max(min(number_of_equal_regions, 9), 2)
+
 # Define the most southerly and northerly latitudes
 southerly <- 49.9
 northerly <- 60.9
@@ -830,7 +833,7 @@ if(number_of_equal_regions == 2) {
 } else if(number_of_equal_regions == 3) {
   labels <- c("South", "Middle", "North")
 } else {
-  labels <- as.character(seq(1, number_of_equal_regions))
+  labels <- paste0("Region ", seq(1, number_of_equal_regions))
 }
 
 #Draws the northerly and southerly latitude lines
@@ -911,16 +914,17 @@ region_split
 
 region_train <- training(region_split)
 region_test <- testing(region_split)
+
 ```
 
-To mitigate the risk of overfitting and enhance the model's generalisability, implementing a 20-fold cross-validation is an industry standard. The **`rsample::vfold_cv`** function within the tidymodels framework facilitates this process. By specifying the training dataset, this function automatically partitions it into 20 subsets, or "folds". During the cross-validation process, the model will be trained on 19 folds and tested on the remaining fold. This cycle repeats 20 times, each time with a different fold serving as the test set, ensuring that every data point is used for both training and validation at least once.
+To mitigate the risk of overfitting and enhance the model's generalisability, implementing a 10-fold cross-validation is an industry standard. The **`rsample::vfold_cv`** function within the tidymodels framework facilitates this process. By specifying the training dataset, this function automatically partitions it into 10 subsets, or "folds". During the cross-validation process, the model will be trained on 9 folds and tested on the remaining fold. This cycle repeats 10 times, each time with a different fold serving as the test set, ensuring that every data point is used for both training and validation at least once.
 
 This approach not only helps in reducing the likelihood of overfitting but also provides a more accurate estimate of the model's performance on unseen data.
 
-```{r Using rsample::vfold_cv() to set up 20 fold Cross-Validation}
+```{r Using rsample::vfold_cv() to set up 10 fold Cross-Validation}
 set.seed(234)
-# Setting up 20 fold cross validation to prevent overfitting.
-region_folds <- vfold_cv(region_train, v = 20)
+# Setting up 10 fold cross validation to prevent overfitting.
+region_folds <- vfold_cv(region_train, v = 10)
 region_folds
 
 ```
@@ -957,7 +961,7 @@ juice(region_prep) %>% # What the df looks like after pre-processing steps
 A random forest model is specified here with an adequate number of trees.
 
 ```{r Specifing a randomforest model}
-rf_spec <- rand_forest(trees = 200) %>% #Setting an adequate number of trees
+rf_spec <- rand_forest(trees = 100) %>% #Setting an adequate number of trees
   set_mode("classification") %>%
   set_engine("ranger")
 
@@ -995,31 +999,35 @@ It reveals that the model misclassified only two stations, indicating a high lev
 ```{r [TRAINING] Summary Table showing the prediction residuals per station}
 region_pred <- rf_rs %>%
   collect_predictions() %>% # Get the predictions
-  mutate(correct = region == .pred_class) %>% # Create new column which reports if the prediction was correct or not.
+  mutate(correct = region == .pred_class,
+         pred_class = .pred_class) %>% # Create new column which reports if the prediction was correct or not.
   left_join(weather_stations_prep %>% mutate(.row = row_number()), by = c(".row", "region")) %>% # Adds the original dataframe onto the prediction df
-  select(-id, -.row, -.config) %>%
-  select(station, region, .pred_class, correct, t_min, t_max, rain, sun, af, starts_with(".pred")) 
+  select(-id, -.row, -.config, -.pred_class) %>%
+  select(station, region, pred_class, correct, t_min, t_max, rain, sun, af, starts_with(".pred")) 
 
-region_pred_summary <- region_pred %>% # Generating a Summary table for all the predictions PER STATION.
+region_labels <- if(number_of_equal_regions == 2) {
+  c("South", "North")
+} else if(number_of_equal_regions == 3) {
+  c("South", "Middle", "North")
+} else {
+  paste0("Region ", seq(1, number_of_equal_regions))
+}
+
+region_pred_summary <- region_pred %>%
   group_by(station) %>%
   reframe(region = region,
-          .pred_South = mean(.pred_South, na.rm = T),
-          .pred_Middle = mean(.pred_Middle, na.rm = T),
-          .pred_North = mean(.pred_North, na.rm = T)
-          ) %>% # Summarizing all the prediction residuals
+          pred_class = pred_class,
+          across(starts_with(".pred_"), ~mean(.x, na.rm = TRUE))) %>%
   ungroup() %>%
-  distinct(station, .keep_all = T) %>% # Drop all the duplicate rows
+  distinct(station, .keep_all = TRUE) %>%
   rowwise() %>%
-  mutate(prediction = names(select(., .pred_South, .pred_Middle, .pred_North))[which.max(c_across(c(.pred_South, .pred_Middle, .pred_North)))] ) %>% 
-  #Creates a new column which basically returns the column name which has the highest residual between .pred_South, .pred_Middle and .pred_North
+  mutate(prediction = region_labels[which.max(c_across(starts_with(".pred_")))],
+         prediction = factor(prediction, levels = region_labels)) %>%
   ungroup() %>%
-  mutate(prediction = str_remove(prediction, "^\\.pred_")) %>% #Removes the .pred_ so we just get the region
-  relocate(prediction, .before = region) %>% 
-  mutate(correct = region == prediction) %>% # Correct will be true if prediction == region
-  relocate(correct, .before = .pred_South) %>%
-  arrange(correct) %>% # Makes sure wrong predictions get brought to the top
-  mutate(prediction = factor(prediction, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")),
-         region = factor(region, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")))
+  mutate(region = factor(region, levels = region_labels),
+         correct = region == prediction) %>%
+  arrange(correct) %>%
+  select(station, prediction, correct, everything(), -pred_class)
 
 region_pred_summary %>% print(n=32)
 ```
@@ -1071,10 +1079,56 @@ rf_spec %>%
   vip(geom = "point")
 ```
 
-### (v) Evaluating the Trained RandomForest Model (with the unseen testing data).
+### (v) Updating the Cluster Map with Predictions
+
+The updated map shows the model accurately classifies the training stations, which is a good start. However, to truly measure its effectiveness, we need to test it on unseen data and see if it can maintain this accuracy outside its training environment.
+
+```{r [TRAINING] Updating the Map with Predictions}
+# Function to determine the color based on the prediction being correct, incorrect, or not found
+getPredictionColor <- function(station_name) {
+  # Check if the station exists in the region_pred_summary
+  if(station_name %in% region_pred_summary$station) {
+    # Get the correct value for the station
+    correct_value <- region_pred_summary$correct[region_pred_summary$station == station_name]
+    # Return green if true, red if false
+    if(correct_value) {
+      return("lightgreen")
+    } else {
+      return("red")
+    }
+  } else {
+    # Return grey if not found
+    return("black")
+  }
+}
+
+colors_vector <- lapply(selected_data_wLocation$station, getPredictionColor)
+
+trained_cluster_map <- 
+  cluster_map %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    color = colors_vector, # Using the colors_vector
+    opacity = 1, fillOpacity = 1, radius = 0.2
+  ) %>%
+  addLegend(
+    'bottomleft',
+    colors = c("lightgreen", "red", "black"), 
+    labels = c("Correct", "Incorrect", "TEST SET"), 
+    title = 'Prediction Accuracy', 
+    opacity = 1)
+
+# Display the map
+trained_cluster_map
+  
+```
+
+### (vi) Evaluating the Trained RandomForest Model (with the unseen testing data).
 
 ```{r Fitting the 5 stations against the model}
-region_final <- region_wf %>% # Applying the model on the testing data is a simple process in TidyModels.
+region_final <- region_wf %>% 
+  # Applying the model on the testing data is a simple process in TidyModels.
   last_fit(region_split)
 ```
 
@@ -1083,31 +1137,35 @@ Here, we can see that out of the 5 stations, the model managed to accurately det
 ```{r [TESTING] Summary Table showing the prediction residuals per station.}
 region_final_pred <- region_final %>%
   collect_predictions() %>%
-  mutate(correct = region == .pred_class) %>%
-  left_join(weather_stations_prep %>% mutate(.row = row_number()), by = c(".row", "region")) %>%
-  select(-id, -.row, -.config) %>%
-  select(station, region, .pred_class, correct, t_min, t_max, rain, sun, af, starts_with(".pred"))
+  mutate(correct = region == .pred_class,
+         pred_class = .pred_class) %>% # Create new column which reports if the prediction was correct or not.
+  left_join(weather_stations_prep %>% mutate(.row = row_number()), by = c(".row", "region")) %>% # Adds the original dataframe onto the prediction df
+  select(-id, -.row, -.config, -.pred_class) %>%
+  select(station, region, pred_class, correct, t_min, t_max, rain, sun, af, starts_with(".pred")) 
 
-region_final_pred_summary <- region_final_pred %>% # Generating a Summary table for all the predictions PER STATION.
+region_labels <- if(number_of_equal_regions == 2) {
+  c("South", "North")
+} else if(number_of_equal_regions == 3) {
+  c("South", "Middle", "North")
+} else {
+  paste0("Region ", seq(1, number_of_equal_regions))
+}
+
+region_final_pred_summary <- region_final_pred %>%
   group_by(station) %>%
   reframe(region = region,
-          .pred_South = mean(.pred_South, na.rm = T),
-          .pred_Middle = mean(.pred_Middle, na.rm = T),
-          .pred_North = mean(.pred_North, na.rm = T)
-          ) %>% # Summarizing all the prediction residuals
+          pred_class = pred_class,
+          across(starts_with(".pred_"), ~mean(.x, na.rm = TRUE))) %>%
   ungroup() %>%
-  distinct(station, .keep_all = T) %>% # Drop all the duplicate rows
+  distinct(station, .keep_all = TRUE) %>%
   rowwise() %>%
-  mutate(prediction = names(select(., .pred_South, .pred_Middle, .pred_North))[which.max(c_across(c(.pred_South, .pred_Middle, .pred_North)))] ) %>% 
-  #Creates a new column which basically returns the column name which has the highest residual between .pred_South, .pred_Middle and .pred_North
+  mutate(prediction = region_labels[which.max(c_across(starts_with(".pred_")))],
+         prediction = factor(prediction, levels = region_labels)) %>%
   ungroup() %>%
-  mutate(prediction = str_remove(prediction, "^\\.pred_")) %>% #Removes the .pred_ so we just get the region
-  relocate(prediction, .before = region) %>% 
-  mutate(correct = region == prediction) %>% # Correct will be true if prediction == region
-  relocate(correct, .before = .pred_South) %>%
-  arrange(correct) %>% #Makes sure wrong predictions get brought to the top
-  mutate(prediction = factor(prediction, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")),
-         region = factor(region, levels = c("South", "Middle", "North"), labels = c("South", "Middle", "North")))
+  mutate(region = factor(region, levels = region_labels),
+         correct = region == prediction) %>%
+  arrange(correct) %>%
+  select(station, prediction, correct, everything(), -pred_class)
 
 region_final_pred_summary
 ```
@@ -1137,6 +1195,51 @@ combined_final_metrics
 
 ```{r [TESTING] Averaged confusion matrix per station}
 conf_mat(region_final_pred_summary, truth = region, estimate = prediction)
+```
+
+### (v) Updating the Cluster Map with Predictions 
+
+The prediction diagram shows the model continues to accurately classify
+the stations in the testing set (unseen stations), proving it can handle new data well.
+
+```{r [TESTING] Updating the Map with Predictions}
+# Function to determine the color based on the prediction being correct, incorrect, or not found
+getPredictionColor <- function(station_name) {
+  # Check if the station exists in the region_pred_summary
+  if(station_name %in% region_final_pred_summary$station) {
+    # Get the correct value for the station
+    correct_value <- region_final_pred_summary$correct[region_final_pred_summary$station == station_name]
+    # Return green if true, red if false
+    if(correct_value) {
+      return("lightgreen")
+    } else {
+      return("red")
+    }
+  } else {
+    # Return grey if not found
+    return("black")
+  }
+}
+
+colors_vector <- lapply(selected_data_wLocation$station, getPredictionColor)
+
+testing_cluster_map <- 
+  cluster_map %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    color = colors_vector, # Using the colors_vector
+    opacity = 1, fillOpacity = 1, radius = 1
+  ) %>%
+  addLegend(
+    'bottomleft',
+    colors = c("lightgreen", "red", "black"), 
+    labels = c("Correct", "Incorrect", "TRAINING SET"), 
+    title = 'Prediction Accuracy', 
+    opacity = 1)
+
+# Display the map
+testing_cluster_map
 ```
 
 ## Part 3 : Real World Happiness Data from ONS
@@ -1182,7 +1285,7 @@ read_excel_from_url <- function(url) {
 }
 ```
 
-Next, all the data is imported from the specified URLs in:\
+Next, all the data is imported from the specified URLs in: \
 `S_Happiness1415`, `S_Happiness1314`, `S_Happiness1213` and `S_Happiness1112`.
 
 ```{r Import the Happiness Data from URLs, echo=TRUE, results='hide'}
