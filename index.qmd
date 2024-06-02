@@ -1197,10 +1197,9 @@ combined_final_metrics
 conf_mat(region_final_pred_summary, truth = region, estimate = prediction)
 ```
 
-### (v) Updating the Cluster Map with Predictions 
+### (v) Updating the Cluster Map with Predictions
 
-The prediction diagram shows the model continues to accurately classify
-the stations in the testing set (unseen stations), proving it can handle new data well.
+The prediction diagram shows the model continues to accurately classify the stations in the testing set (unseen stations), proving it can handle new data well.
 
 ```{r [TESTING] Updating the Map with Predictions}
 # Function to determine the color based on the prediction being correct, incorrect, or not found
@@ -1285,7 +1284,7 @@ read_excel_from_url <- function(url) {
 }
 ```
 
-Next, all the data is imported from the specified URLs in: \
+Next, all the data is imported from the specified URLs in:\
 `S_Happiness1415`, `S_Happiness1314`, `S_Happiness1213` and `S_Happiness1112`.
 
 ```{r Import the Happiness Data from URLs, echo=TRUE, results='hide'}
